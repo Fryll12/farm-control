@@ -261,6 +261,7 @@ def reboot_bot(target_id):
                 print(f"[Reboot] Sub Bot {index} đã khởi động lại.", flush=True)
 
 def auto_reboot_loop():
+    global last_reboot_cycle_time
     while not auto_reboot_stop_event.is_set():
         try:
             if auto_reboot_enabled and (time.time() - last_reboot_cycle_time) >= auto_reboot_delay:
