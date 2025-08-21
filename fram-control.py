@@ -1,4 +1,4 @@
-# PHIÊN BẢN ĐIỀU KHIỂN FARM - NÂNG CẤP VỚI NHÓM VÀ BOT ĐỘNG
+# PHIÊN BẢN ĐIỀU KHIỂN FARM - NÂNG CẤP VỚI NHÓM VÀ BOT ĐỘNG #
 import discum
 import threading
 import time
