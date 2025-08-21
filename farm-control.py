@@ -264,9 +264,9 @@ def auto_reboot_loop():
     while not auto_reboot_stop_event.is_set():
         try:
             if auto_reboot_enabled and (time.time() - last_reboot_cycle_time) >= auto_reboot_delay:
-                print("[Reboot] Bắt đầu chu kỳ reboot tự động...", flush=True)
-                all_bot_ids = list(bot_active_states.keys())
-                for bot_id in all_bot_ids:
+                print("[Reboot] Bắt đầu chu kỳ reboot tự động cho các ACC MAIN...", flush=True)
+                main_bot_ids = [bot_id for bot_id in bot_active_states.keys() if bot_id.startswith('main')]
+                for bot_id in main_bot_ids:
                     if bot_active_states.get(bot_id, False):
                         reboot_bot(bot_id)
                         time.sleep(5)
