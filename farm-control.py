@@ -187,20 +187,46 @@ def create_bot(token, bot_type, bot_index):
     threading.Thread(target=bot.gateway.run, daemon=True).start()
     return bot
 
-# --- CÁC VÒNG LẶP NỀN ---
 spam_tasks_running = set()
 def spam_loop():
+    # Hàm này là một "chuyên viên spam", nhận nhiệm vụ cho MỘT farm và thực hiện
+    def run_spam_cycle(task_id, channel_id, message, bots_to_use):
+        global spam_tasks_running
+        try:
+            # print(f"[Spam Cycle] Bắt đầu nhiệm vụ '{task_id}' với {len(bots_to_use)} bot.", flush=True)
+            for bot in bots_to_use:
+                try:
+                    bot.sendMessage(channel_id, message)
+                    time.sleep(2) # Delay giữa các bot trong cùng 1 farm
+                except Exception:
+                    pass
+        finally:
+            if task_id in spam_tasks_running:
+                spam_tasks_running.remove(task_id)
+
     while True:
         try:
             now = time.time()
-            for group in farm_groups:
-                if not group.get('spam_enabled'): continue
-                
-                group_id = group.get('id')
-                last_spam = group.get('last_spam_time', 0)
-                delay = group.get('spam_delay', 10)
+            
+            # --- Vòng lặp chính sẽ duyệt qua từng FARM, không phải từng GROUP ---
+            for server in farm_servers:
+                server_id = server.get('id')
+                if not server_id: continue
 
-                if (now - last_spam) >= delay and group_id not in spam_tasks_running:
+                # Kiểm tra xem server có sẵn sàng để spam không
+                last_spam_time = server.get('last_spam_time', 0)
+                spam_delay = server.get('spam_delay', 10) # Sử dụng delay của từng farm
+
+                if (now - last_spam_time) >= spam_delay and server_id not in spam_tasks_running:
+                    # Server đã sẵn sàng, bây giờ kiểm tra "giấy phép" từ group
+                    group_id = server.get('group_id')
+                    if not group_id: continue # Nếu farm không thuộc group nào, bỏ qua
+
+                    group = next((g for g in farm_groups if g.get('id') == group_id), None)
+                    if not group or not group.get('spam_enabled'):
+                        continue # Nếu không tìm thấy group hoặc group đang tắt spam, bỏ qua
+
+                    # Group đã cho phép, lấy "đội quân" bot đã chọn cho group đó
                     selected_bot_ids = group.get('selected_bots', [])
                     bots_to_use = []
                     with bots_lock:
@@ -215,27 +241,16 @@ def spam_loop():
                     
                     if not bots_to_use: continue
 
-                    farms_in_group = [s for s in farm_servers if s.get('group_id') == group_id]
-                    if not farms_in_group: continue
-
-                    spam_tasks_running.add(group_id)
-                    group['last_spam_time'] = now
+                    # Mọi điều kiện đã đủ, cấp một luồng riêng cho FARM này để chạy song song
+                    spam_tasks_running.add(server_id)
+                    server['last_spam_time'] = now # Cập nhật thời gian spam của riêng farm này
                     
-                    def group_spam_task(g_id, farms, bots_list):
-                        print(f"[SPAM] Bắt đầu spam cho nhóm {group['name']} với {len(bots_list)} bot.", flush=True)
-                        for server in farms:
-                            msg = server.get('spam_message')
-                            chan_id = server.get('spam_channel_id')
-                            if not msg or not chan_id: continue
-                            for i, bot in enumerate(bots_list):
-                                try:
-                                    bot.sendMessage(chan_id, msg)
-                                    time.sleep(2) # Delay giữa các bot
-                                except Exception: pass
-                        spam_tasks_running.remove(g_id)
-                        print(f"[SPAM] Hoàn thành spam cho nhóm {group['name']}.", flush=True)
-
-                    threading.Thread(target=group_spam_task, args=(group_id, farms_in_group, bots_to_use)).start()
+                    print(f"[SPAM DISPATCHER] Cấp luồng cho farm '{server['name']}' trong nhóm '{group['name']}'.", flush=True)
+                    threading.Thread(
+                        target=run_spam_cycle, 
+                        args=(server_id, server['spam_channel_id'], server['spam_message'], bots_to_use)
+                    ).start()
+            
             time.sleep(1)
         except Exception as e:
             print(f"[SPAM ERROR] Lỗi trong vòng lặp spam: {e}", flush=True)
