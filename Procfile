@@ -1,1 +1,1 @@
-web: gunicorn 'farm_control claude (tv discord.py)':app
+web: gunicorn farm-control:app
