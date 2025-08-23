@@ -923,6 +923,7 @@ def api_event_grab_toggle():
     return jsonify({'status': 'success', 'message': f"Event Grab đã {'BẬT' if event_grab_enabled else 'TẮT'}"})
 
 # --- MAIN EXECUTION ---
+# --- MAIN EXECUTION ---
 if __name__ == "__main__":
     load_farm_settings()
     load_main_settings()
@@ -947,6 +948,9 @@ if __name__ == "__main__":
                 if f'sub_{i}' not in bot_active_states: bot_active_states[f'sub_{i}'] = True
 
     print("Đang khởi tạo các luồng nền...", flush=True)
+    # TÁCH RIÊNG CÁC DÒNG NÀY RA
+    threading.Thread(target=optimized_spam_loop, daemon=True).start()
+    threading.Thread(target=periodic_save_loop, daemon=True).start()
     threading.Thread(target=heart_data_cleanup, daemon=True).start()
 
     if auto_reboot_enabled and (auto_reboot_thread is None or not auto_reboot_thread.is_alive()):
@@ -956,6 +960,6 @@ if __name__ == "__main__":
     
     port = int(os.environ.get("PORT", 10001))
     print(f"Khởi động Farm Control Panel tại http://0.0.0.0:{port}", flush=True)
-    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)optimized_spam_loop, daemon=True).start()
-    threading.Thread(target=periodic_save_loop, daemon=True).start()
-    threading.Thread(target=
+    
+    # DÒNG NÀY PHẢI ĐỨNG MỘT MÌNH
+    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
