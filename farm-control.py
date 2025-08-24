@@ -29,7 +29,7 @@ auto_reboot_delay = 3600
 last_reboot_cycle_time = 0
 auto_reboot_stop_event = threading.Event()
 auto_reboot_thread = None
-bots_lock = threading.Lock()
+bots_lock = threading.RLock()
 server_start_time = time.time()
 bot_active_states = {}
 
@@ -284,11 +284,13 @@ def auto_reboot_loop():
         try:
             if auto_reboot_enabled and (time.time() - last_reboot_cycle_time) >= auto_reboot_delay:
                 print("[Reboot] Bắt đầu chu kỳ reboot tự động...", flush=True)
-                with bots_lock:
-                    for i in range(len(main_bots)):
-                        if bot_active_states.get(f'main_{i}', False): 
-                            reboot_bot(f'main_{i}')
-                            time.sleep(5)
+                # Bỏ lock ở đây để tránh giữ khóa quá lâu
+                for i in range(len(main_bots)):
+                    # Kiểm tra trạng thái active trước khi reboot
+                    if bot_active_states.get(f'main_{i}', False): 
+                        reboot_bot(f'main_{i}') # Hàm reboot_bot đã có lock riêng của nó
+                        time.sleep(5)
+                
                 last_reboot_cycle_time = time.time()
                 save_main_settings()  # Lưu thời gian reboot mới
             if auto_reboot_stop_event.wait(timeout=60): 
