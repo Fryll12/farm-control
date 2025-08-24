@@ -24,14 +24,12 @@ karuta_id = "646937666251915264"
 yoru_bot_id = "1311684840462225440"
 
 # --- MEMORY MANAGEMENT ---
-# Sử dụng ThreadPoolExecutor thay vì tạo thread liên tục
 THREAD_POOL = ThreadPoolExecutor(max_workers=20, thread_name_prefix="farm_worker")
-# Queue để xử lý các task một cách tuần tự
-GRAB_QUEUE = queue.Queue(maxsize=1000)  # Giới hạn queue size
-ACTIVE_TIMERS = set()  # Track active timers để cleanup
-CONNECTION_CLEANUP_INTERVAL = 300  # 5 phút cleanup connections
+GRAB_QUEUE = queue.Queue(maxsize=1000)
+ACTIVE_TIMERS = set()
+CONNECTION_CLEANUP_INTERVAL = 300
 
-# --- BIẾN TRẠNG THÁI (UNCHANGED) ---
+# --- BIẾN TRẠNG THÁI ---
 main_bots = []
 event_grab_enabled = False
 auto_reboot_enabled = False
@@ -46,7 +44,6 @@ farm_servers = []
 main_panel_settings = {
     "auto_grab_enabled_alpha": False, "heart_threshold_alpha": 15,
     "auto_grab_enabled_main_other": False, "heart_threshold_main_other": 50,
-    "spam_message": "kcf", "spam_delay": 10
 }
 
 # --- MEMORY SAFE TIMER CLASS ---
@@ -71,19 +68,16 @@ class ManagedTimer:
         ACTIVE_TIMERS.discard(self)
 
 def cleanup_timers():
-    """Cleanup expired timers"""
     expired = [timer for timer in ACTIVE_TIMERS if not timer.timer.is_alive()]
     for timer in expired:
         ACTIVE_TIMERS.discard(timer)
 
 # --- GRAB QUEUE PROCESSOR ---
 def grab_queue_processor():
-    """Xử lý grab requests từ queue thay vì tạo thread mới liên tục"""
     while True:
         try:
             grab_task = GRAB_QUEUE.get(timeout=1)
-            if grab_task is None:  # Poison pill để stop
-                break
+            if grab_task is None: break
             
             bot, channel_id, message_id, emoji, delay = grab_task
             time.sleep(delay)
@@ -100,12 +94,56 @@ def grab_queue_processor():
         except Exception as e:
             print(f"[GRAB QUEUE] Lỗi processor: {e}", flush=True)
 
-# Start grab queue processor
 THREAD_POOL.submit(grab_queue_processor)
 
+# --- <<< NEW FUNCTIONS: SAVE/LOAD MAIN SETTINGS >>> ---
+def save_main_settings():
+    """Lưu các cài đặt global (main panel, auto reboot, etc.)"""
+    api_key = os.getenv("JSONBIN_API_KEY")
+    main_bin_id = os.getenv("MAIN_JSONBIN_BIN_ID") # Cần thêm variable này vào .env
+    if not api_key or not main_bin_id: return
+
+    settings_to_save = {
+        'main_panel_settings': main_panel_settings,
+        'event_grab_enabled': event_grab_enabled,
+        'auto_reboot_enabled': auto_reboot_enabled,
+        'auto_reboot_delay': auto_reboot_delay,
+        'bot_active_states': bot_active_states
+    }
+
+    headers = {'Content-Type': 'application/json', 'X-Master-Key': api_key}
+    url = f"https://api.jsonbin.io/v3/b/{main_bin_id}"
+    try:
+        req = requests.put(url, json=settings_to_save, headers=headers, timeout=10)
+        if req.status_code == 200: 
+            print("[Main Settings] Đã lưu cài đặt chính.", flush=True)
+    except Exception as e: 
+        print(f"[Main Settings] Lỗi khi lưu cài đặt chính: {e}", flush=True)
+
+def load_main_settings():
+    """Tải các cài đặt global khi khởi động"""
+    global main_panel_settings, event_grab_enabled, auto_reboot_enabled, auto_reboot_delay, bot_active_states
+    api_key = os.getenv("JSONBIN_API_KEY")
+    main_bin_id = os.getenv("MAIN_JSONBIN_BIN_ID")
+    if not api_key or not main_bin_id: return
+
+    headers = {'X-Master-Key': api_key, 'X-Bin-Meta': 'false'}
+    url = f"https://api.jsonbin.io/v3/b/{main_bin_id}/latest"
+    try:
+        req = requests.get(url, headers=headers, timeout=10)
+        if req.status_code == 200:
+            data = req.json()
+            main_panel_settings = data.get('main_panel_settings', main_panel_settings)
+            event_grab_enabled = data.get('event_grab_enabled', event_grab_enabled)
+            auto_reboot_enabled = data.get('auto_reboot_enabled', auto_reboot_enabled)
+            auto_reboot_delay = data.get('auto_reboot_delay', auto_reboot_delay)
+            bot_active_states = data.get('bot_active_states', bot_active_states)
+            print("[Main Settings] Đã tải cài đặt chính.", flush=True)
+    except Exception as e:
+        print(f"[Main Settings] Không thể tải cài đặt chính, dùng mặc định: {e}", flush=True)
+        
 # --- OPTIMIZED FUNCTIONS ---
 def save_farm_settings():
-    # Unchanged
     api_key = os.getenv("JSONBIN_API_KEY")
     farm_bin_id = os.getenv("FARM_JSONBIN_BIN_ID")
     if not api_key or not farm_bin_id: return
@@ -117,7 +155,6 @@ def save_farm_settings():
     except Exception as e: print(f"[Farm Settings] Lỗi khi lưu farm panels: {e}", flush=True)
 
 def load_farm_settings():
-    # Unchanged
     global farm_servers
     api_key = os.getenv("JSONBIN_API_KEY")
     farm_bin_id = os.getenv("FARM_JSONBIN_BIN_ID")
@@ -133,59 +170,45 @@ def load_farm_settings():
     except Exception: farm_servers = []
 
 def get_grab_settings(target_server, bot_type, bot_index):
-    # Unchanged
     if bot_type == 'main' and bot_index == 0:
         return target_server.get('auto_grab_enabled_alpha', False), target_server.get('heart_threshold_alpha', 15), {0: 0.2, 1: 1.2, 2: 2.0}
     else:
         return target_server.get('auto_grab_enabled_main_other', False), target_server.get('heart_threshold_main_other', 50), {0: 1.0, 1: 2.0, 2: 2.8}
 
 def broadcast_grab_to_main_bots(channel_id, message_id, emoji, max_index, target_server):
-    """OPTIMIZED: Sử dụng queue thay vì tạo Timer liên tục"""
     with bots_lock:
         for i, bot in enumerate(main_bots):
             if not bot_active_states.get(f'main_{i}', False):
                 continue
-
             is_enabled, _, delays = get_grab_settings(target_server, 'main', i)
             if not is_enabled:
                 continue
-            
             delay = delays.get(max_index, 1.5)
-            
-            # Thêm vào queue thay vì tạo Timer
             try:
                 GRAB_QUEUE.put((bot, channel_id, message_id, emoji, delay), block=False)
-                print(f"[FARM BROADCAST] Đã thêm grab task cho Main Bot {i} vào queue", flush=True)
             except queue.Full:
                 print(f"[FARM BROADCAST] Queue đầy, bỏ qua grab task cho Bot {i}", flush=True)
             
-            # KTB chỉ cho Alpha bot, sử dụng ManagedTimer
             if i == 0:
                 ktb_channel_id = target_server.get('ktb_channel_id')
                 if ktb_channel_id:
-                    ktb_timer = ManagedTimer(delay + 2, lambda: bot.sendMessage(ktb_channel_id, "kt b"))
-                    ktb_timer.start()
+                    ManagedTimer(delay + 2, lambda: bot.sendMessage(ktb_channel_id, "kt b")).start()
 
 def initiate_grab_sequence(alpha_bot, msg):
-    """OPTIMIZED: Sử dụng ThreadPoolExecutor thay vì tạo thread mới"""
     channel_id = msg.get("channel_id")
     target_server = next((s for s in farm_servers if s.get('main_channel_id') == channel_id), None)
     if not target_server: return
 
-    # --- Event Grab (Sử dụng ThreadPool) ---
     if event_grab_enabled:
         def check_farm_event():
             try:
                 time.sleep(5)
                 full_msg_obj = alpha_bot.getMessage(channel_id, msg["id"]).json()[0]
                 if 'reactions' in full_msg_obj and any(r['emoji']['name'] == '🉐' for r in full_msg_obj['reactions']):
-                    print(f"[EVENT GRAB | FARM: {target_server['name']}] Phát hiện dưa hấu! Alpha Bot nhặt.", flush=True)
                     alpha_bot.addReaction(channel_id, msg["id"], "🉐")
             except Exception as e: print(f"Lỗi kiểm tra event: {e}", flush=True)
-        
         THREAD_POOL.submit(check_farm_event)
 
-    # --- Card Grab (Sử dụng ThreadPool) ---
     def read_yoru_and_coordinate():
         time.sleep(0.6)
         try:
@@ -194,82 +217,60 @@ def initiate_grab_sequence(alpha_bot, msg):
                 if msg_item.get("author", {}).get("id") == yoru_bot_id and msg_item.get("embeds"):
                     desc = msg_item["embeds"][0].get("description", "")
                     heart_numbers = [int(match.group(1)) if (match := re.search(r'♡(\d+)', line)) else 0 for line in desc.split('\n')[:3]]
-                    
                     if not any(heart_numbers): break
-
                     _, heart_threshold, _ = get_grab_settings(target_server, 'main', 0)
-                    
                     max_num = max(heart_numbers)
                     if max_num >= heart_threshold:
                         max_index = heart_numbers.index(max_num)
                         emoji = ["1️⃣", "2️⃣", "3️⃣"][max_index]
-                        
-                        print(f"[FARM COORDINATOR: {target_server['name']}] Quyết định grab -> {max_num} tim. Bắt đầu ra lệnh...", flush=True)
                         broadcast_grab_to_main_bots(channel_id, msg["id"], emoji, max_index, target_server)
                     break 
         except Exception as e: print(f"Lỗi đọc Yoru Bot và điều phối: {e}", flush=True)
-    
     THREAD_POOL.submit(read_yoru_and_coordinate)
 
 def create_bot(token, bot_type, bot_index):
-    """OPTIMIZED: Thêm connection tracking"""
     bot = discum.Client(token=token, log=False)
-    
     @bot.gateway.command
     def on_ready(resp):
         if resp.event.ready:
             user = resp.raw.get('user', {})
             print(f"Bot '{GREEK_ALPHABET[bot_index]}' đã đăng nhập: {user.get('username')}", flush=True)
-
     @bot.gateway.command
     def on_message(resp):
-        if bot_index == 0:  # Chỉ Alpha bot xử lý
+        if bot_index == 0:
             if not (resp.event.message or (resp.raw and resp.raw.get('t') == 'MESSAGE_UPDATE')): return
             msg = resp.parsed.auto()
-            
             if msg.get("author", {}).get("id") == karuta_id and 'dropping 3' in msg.get("content", ""):
                 initiate_grab_sequence(bot, msg)
-
     THREAD_POOL.submit(bot.gateway.run)
     return bot
 
 # --- MEMORY CLEANUP FUNCTIONS ---
 def cleanup_expired_connections():
-    """Dọn dẹp connections không sử dụng"""
-    cleanup_timers()  # Cleanup timers
+    cleanup_timers()
     print(f"[CLEANUP] Active timers: {len(ACTIVE_TIMERS)}, Queue size: {GRAB_QUEUE.qsize()}", flush=True)
 
 def reboot_bot(target_id):
-    """OPTIMIZED: Đảm bảo cleanup connection cũ"""
     with bots_lock:
         bot_type, index_str = target_id.split('_')
         index = int(index_str)
         if bot_type == 'main' and index < len(main_bots):
-            # Cleanup connection cũ tốt hơn
             old_bot = main_bots[index]
             try:
-                if hasattr(old_bot, 'gateway') and hasattr(old_bot.gateway, 'close'):
-                    old_bot.gateway.close()
-                if hasattr(old_bot, 'close'):
-                    old_bot.close()
-            except Exception as e:
-                print(f"[CLEANUP] Lỗi khi đóng bot cũ: {e}", flush=True)
+                if hasattr(old_bot, 'gateway') and hasattr(old_bot.gateway, 'close'): old_bot.gateway.close()
+                if hasattr(old_bot, 'close'): old_bot.close()
+            except Exception as e: print(f"[CLEANUP] Lỗi khi đóng bot cũ: {e}", flush=True)
             
-            # Tạo bot mới
             token = main_token_alpha if index == 0 else other_main_tokens[index - 1]
             main_bots[index] = create_bot(token, 'main', index)
             print(f"[Reboot] Main Bot {index} ({GREEK_ALPHABET[index]}) đã khởi động lại.", flush=True)
 
 def auto_reboot_loop():
-    """OPTIMIZED: Thêm cleanup định kỳ"""
     while not auto_reboot_stop_event.is_set():
         try:
             current_time = time.time()
-            
-            # Cleanup định kỳ
             if current_time % CONNECTION_CLEANUP_INTERVAL < 60:
                 cleanup_expired_connections()
-            
             if auto_reboot_enabled and (current_time - last_reboot_cycle_time) >= auto_reboot_delay:
                 print("[Reboot] Bắt đầu chu kỳ reboot tự động...", flush=True)
                 with bots_lock:
@@ -278,62 +279,45 @@ def auto_reboot_loop():
                             reboot_bot(f'main_{i}')
                             time.sleep(5)
                 globals()['last_reboot_cycle_time'] = time.time()
-            
-            if auto_reboot_stop_event.wait(timeout=60):
-                break
+            if auto_reboot_stop_event.wait(timeout=60): break
         except Exception as e:
             print(f"[ERROR in auto_reboot_loop] {e}", flush=True)
             time.sleep(60)
     print("[Reboot] Luồng tự động reboot đã dừng.", flush=True)
 
 def periodic_save_loop():
-    """OPTIMIZED: Thêm memory monitoring"""
     while True:
         time.sleep(300)
-        print("[Settings] Bắt đầu lưu định kỳ...", flush=True)
         save_farm_settings()
-        
-        # Memory status logging
-        import psutil
-        process = psutil.Process()
-        memory_mb = process.memory_info().rss / 1024 / 1024
-        print(f"[MEMORY] RAM usage: {memory_mb:.1f}MB, Active timers: {len(ACTIVE_TIMERS)}, Queue: {GRAB_QUEUE.qsize()}", flush=True)
-        
-        # Cleanup if memory usage too high
-        if memory_mb > 500:  # Nếu dùng > 500MB
-            print("[MEMORY] High memory usage detected, running cleanup...", flush=True)
-            cleanup_expired_connections()
+        try:
+            import psutil
+            process = psutil.Process()
+            memory_mb = process.memory_info().rss / 1024 / 1024
+            print(f"[MEMORY] RAM usage: {memory_mb:.1f}MB, Active timers: {len(ACTIVE_TIMERS)}, Queue: {GRAB_QUEUE.qsize()}", flush=True)
+            if memory_mb > 500:
+                print("[MEMORY] High memory usage detected, running cleanup...", flush=True)
+                cleanup_expired_connections()
+        except ImportError:
+            pass # psutil might not be installed
 
 # --- SHUTDOWN HANDLER ---
 def shutdown_handler():
-    """Cleanup khi tắt server"""
     print("[SHUTDOWN] Cleaning up resources...", flush=True)
-    
-    # Stop grab queue
-    GRAB_QUEUE.put(None)  # Poison pill
-    
-    # Cancel all active timers
+    GRAB_QUEUE.put(None)
     for timer in ACTIVE_TIMERS.copy():
         timer.cancel()
-    
-    # Shutdown thread pool
     THREAD_POOL.shutdown(wait=False)
-    
-    # Close bot connections
     with bots_lock:
         for bot in main_bots:
             try:
-                if hasattr(bot, 'gateway'):
-                    bot.gateway.close()
-            except:
-                pass
+                if hasattr(bot, 'gateway'): bot.gateway.close()
+            except: pass
 
 import atexit
 atexit.register(shutdown_handler)
 
-# --- FLASK APP (UNCHANGED) ---
+# --- FLASK APP ---
 app = Flask(__name__)
-# --- GIAO DIỆN WEB ---
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="vi">
@@ -434,7 +418,6 @@ document.addEventListener('DOMContentLoaded', function () {
         msgContainer.style.display = 'block';
         setTimeout(() => { msgContainer.style.display = 'none'; }, 4000);
     };
-
     const postData = async (url, data) => {
         try {
             const response = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
@@ -442,11 +425,8 @@ document.addEventListener('DOMContentLoaded', function () {
             showMsg(result.message);
             if (result.reload) setTimeout(() => location.reload(), 500);
             return result;
-        } catch (error) {
-            showMsg('Lỗi giao tiếp với server.');
-        }
+        } catch (error) { showMsg('Lỗi giao tiếp với server.'); }
     };
-
     const fetchBotStatus = async () => {
         try {
             const response = await fetch('/status');
@@ -456,64 +436,46 @@ document.addEventListener('DOMContentLoaded', function () {
             data.bot_statuses.forEach(bot => {
                 const stateClass = bot.is_active ? 'btn-success' : 'btn-danger';
                 const stateText = bot.is_active ? 'ONLINE' : 'OFFLINE';
-                content += `<div class="bot-status-item">
-                                <span>${bot.name}</span>
-                                <button class="btn btn-sm ${stateClass} btn-toggle-state" data-target="${bot.reboot_id}">${stateText}</button>
-                           </div>`;
+                content += `<div class="bot-status-item"><span>${bot.name}</span><button class="btn btn-sm ${stateClass} btn-toggle-state" data-target="${bot.reboot_id}">${stateText}</button></div>`;
             });
             botListDiv.innerHTML = content;
-        } catch (error) {
-            console.error("Failed to fetch bot status:", error);
-        }
+        } catch (error) { console.error("Failed to fetch bot status:", error); }
     };
-    
     document.getElementById('auto-reboot-toggle-btn').addEventListener('click', () => {
         const delay = document.getElementById('auto-reboot-delay').value;
-        postData('/api/reboot_toggle_auto', { delay: delay }).then(r => {
-            if (r && r.reload) { /* Let reload handle it */ } else { location.reload(); }
-        });
+        postData('/api/reboot_toggle_auto', { delay: delay }).then(r => { if (!r || !r.reload) { location.reload(); } });
     });
-
     document.getElementById('event-grab-toggle-btn').addEventListener('click', () => {
-        postData('/api/event_grab_toggle', {}).then(r => {
-            if (r && r.reload) { /* Let reload handle it */ } else { location.reload(); }
-        });
+        postData('/api/event_grab_toggle', {}).then(r => { if (!r || !r.reload) { location.reload(); } });
     });
-
     document.getElementById('bot-status-list').addEventListener('click', e => {
         if (e.target.matches('.btn-toggle-state')) {
             postData('/api/toggle_bot_state', { target: e.target.dataset.target });
             setTimeout(fetchBotStatus, 500);
         }
     });
-
     const mainPanel = document.querySelector('.main-panel');
     mainPanel.addEventListener('change', e => {
         if (e.target.matches('.main-panel-input')) {
-            const data = {};
-            data[e.target.dataset.field] = e.target.value;
+            const data = {}; data[e.target.dataset.field] = e.target.value;
             postData('/api/main_panel/update', data);
         }
     });
     mainPanel.addEventListener('click', e => {
         if (e.target.matches('.main-panel-toggle')) {
-            const data = {};
-            data[e.target.dataset.field] = 'toggle';
+            const data = {}; data[e.target.dataset.field] = 'toggle';
             postData('/api/main_panel/update', data).then(() => location.reload());
         }
     });
-
     document.getElementById('sync-from-main-btn').addEventListener('click', () => {
         if (confirm('Bạn có chắc muốn đồng bộ cài đặt từ Main Panel cho TẤT CẢ các farm không?')) {
             postData('/api/main_panel/sync', {});
         }
     });
-
     document.getElementById('add-farm-btn').addEventListener('click', () => {
         const name = prompt("Nhập tên farm mới:");
         if (name) postData('/api/farm/add', { name });
     });
-
     const farmGrid = document.getElementById('farm-grid');
     farmGrid.addEventListener('click', e => {
         if (e.target.matches('.delete-farm-btn')) {
@@ -529,7 +491,6 @@ document.addEventListener('DOMContentLoaded', function () {
             postData('/api/farm/update', data);
         }
     });
-
     fetchBotStatus();
 });
 </script>
@@ -542,12 +503,10 @@ document.addEventListener('DOMContentLoaded', function () {
 def index():
     reboot_action, reboot_button_class = ("DISABLE REBOOT", "btn-danger") if auto_reboot_enabled else ("ENABLE REBOOT", "btn-success")
     event_grab_action, event_grab_button_class = ("DISABLE EVENT GRAB", "btn-danger") if event_grab_enabled else ("ENABLE EVENT GRAB", "btn-success")
-    
     return render_template_string(HTML_TEMPLATE,
         auto_reboot_delay=auto_reboot_delay, reboot_action=reboot_action, reboot_button_class=reboot_button_class,
         event_grab_action=event_grab_action, event_grab_button_class=event_grab_button_class,
-        farm_servers=farm_servers,
-        main_panel=main_panel_settings
+        farm_servers=farm_servers, main_panel=main_panel_settings
     )
 
 @app.route("/status")
@@ -557,13 +516,10 @@ def status():
         for i in range(len(main_bots)):
             name = GREEK_ALPHABET[i] if i < len(GREEK_ALPHABET) else f"Main {i}"
             bot_status_list.append({
-                "name": name, 
-                "reboot_id": f"main_{i}", 
-                "is_active": bot_active_states.get(f'main_{i}', True)
+                "name": name, "reboot_id": f"main_{i}", "is_active": bot_active_states.get(f'main_{i}', True)
             })
     return jsonify({'bot_statuses': bot_status_list})
 
-# --- NEW API ENDPOINTS ---
 @app.route("/api/main_panel/update", methods=['POST'])
 def api_main_panel_update():
     data = request.json
@@ -572,13 +528,9 @@ def api_main_panel_update():
             if value == 'toggle':
                 main_panel_settings[key] = not main_panel_settings[key]
             else:
-                # Chuyển đổi kiểu dữ liệu cho đúng
-                original_type = type(main_panel_settings[key])
-                try:
-                    main_panel_settings[key] = original_type(value)
-                except ValueError:
-                    # Bỏ qua nếu không chuyển đổi được
-                    pass
+                original_type = type(main_panel_settings.get(key, ''))
+                try: main_panel_settings[key] = original_type(value)
+                except (ValueError, TypeError): pass
     save_main_settings()
     return jsonify({'status': 'success', 'message': 'Đã cập nhật Main Panel.'})
 
@@ -586,12 +538,13 @@ def api_main_panel_update():
 def api_main_panel_sync():
     sync_count = 0
     for server in farm_servers:
-        server['auto_grab_enabled_alpha'] = main_panel_settings['auto_grab_enabled_alpha']
-        server['heart_threshold_alpha'] = main_panel_settings['heart_threshold_alpha']
-        server['auto_grab_enabled_main_other'] = main_panel_settings['auto_grab_enabled_main_other']
-        server['heart_threshold_main_other'] = main_panel_settings['heart_threshold_main_other']
+        server.update({
+            'auto_grab_enabled_alpha': main_panel_settings['auto_grab_enabled_alpha'],
+            'heart_threshold_alpha': main_panel_settings['heart_threshold_alpha'],
+            'auto_grab_enabled_main_other': main_panel_settings['auto_grab_enabled_main_other'],
+            'heart_threshold_main_other': main_panel_settings['heart_threshold_main_other']
+        })
         sync_count += 1
-            
     save_farm_settings()
     return jsonify({'status': 'success', 'message': f'Đã đồng bộ cài đặt cho {sync_count} farm.'})
 
@@ -599,17 +552,10 @@ def api_main_panel_sync():
 def api_farm_add():
     name = request.json.get('name')
     if not name: return jsonify({'status': 'error', 'message': 'Tên farm là bắt buộc.'}), 400
-    
     new_server = {
-        "id": f"farm_{int(time.time())}_{random.randint(100,999)}", 
-        "name": name,
-        "main_channel_id": "", 
-        "ktb_channel_id": "",
-        # Đồng bộ cài đặt từ main panel khi tạo mới
-        "auto_grab_enabled_alpha": main_panel_settings['auto_grab_enabled_alpha'], 
-        "heart_threshold_alpha": main_panel_settings['heart_threshold_alpha'],
-        "auto_grab_enabled_main_other": main_panel_settings['auto_grab_enabled_main_other'], 
-        "heart_threshold_main_other": main_panel_settings['heart_threshold_main_other'],
+        "id": f"farm_{int(time.time())}_{random.randint(100,999)}", "name": name,
+        "main_channel_id": "", "ktb_channel_id": "",
+        **main_panel_settings
     }
     farm_servers.append(new_server)
     save_farm_settings()
@@ -629,44 +575,27 @@ def api_farm_update():
     farm_id = data.get('farm_id')
     server = next((s for s in farm_servers if s.get('id') == farm_id), None)
     if not server: return jsonify({'status': 'error', 'message': 'Không tìm thấy farm.'}), 404
-    
     for key in ['main_channel_id', 'ktb_channel_id']:
-        if key in data:
-            server[key] = data[key]
-    
+        if key in data: server[key] = data[key]
     save_farm_settings()
     return jsonify({'status': 'success', 'message': f'Đã cập nhật kênh cho farm.'})
 
-# --- GLOBAL CONTROL API (FIXED) ---
 @app.route("/api/reboot_toggle_auto", methods=['POST'])
 def api_reboot_toggle_auto():
     global auto_reboot_enabled, auto_reboot_thread, auto_reboot_stop_event, auto_reboot_delay
-    
     auto_reboot_enabled = not auto_reboot_enabled
-    
-    new_delay_str = request.json.get("delay")
-    if new_delay_str:
-        try:
-            auto_reboot_delay = int(new_delay_str)
-        except (ValueError, TypeError):
-            return jsonify({'status': 'error', 'message': 'Delay không hợp lệ.'}), 400
-
+    try: auto_reboot_delay = int(request.json.get("delay", auto_reboot_delay))
+    except (ValueError, TypeError): pass
     if auto_reboot_enabled:
         if auto_reboot_thread is None or not auto_reboot_thread.is_alive():
             auto_reboot_stop_event = threading.Event()
             auto_reboot_thread = threading.Thread(target=auto_reboot_loop, daemon=True)
             auto_reboot_thread.start()
     else:
-        if auto_reboot_stop_event:
-            auto_reboot_stop_event.set()
+        if auto_reboot_stop_event: auto_reboot_stop_event.set()
         auto_reboot_thread = None
-        
     save_main_settings()
-    return jsonify({
-        'status': 'success', 
-        'message': f'Auto Reboot đã {"BẬT" if auto_reboot_enabled else "TẮT"}. Delay: {auto_reboot_delay}s.',
-        'reload': True
-    })
+    return jsonify({'status': 'success', 'message': f'Auto Reboot đã {"BẬT" if auto_reboot_enabled else "TẮT"}. Delay: {auto_reboot_delay}s.', 'reload': True})
 
 @app.route("/api/toggle_bot_state", methods=['POST'])
 def api_toggle_bot_state():
@@ -674,9 +603,8 @@ def api_toggle_bot_state():
     if target in bot_active_states:
         bot_active_states[target] = not bot_active_states.get(target, True)
         state_text = "ONLINE" if bot_active_states[target] else "OFFLINE"
-        msg = f"Bot {target.replace('_', ' ').upper()} đã được đặt thành {state_text}."
         save_main_settings()
-        return jsonify({'status': 'success', 'message': msg})
+        return jsonify({'status': 'success', 'message': f"Bot {target.replace('_', ' ').upper()} đã được đặt thành {state_text}."})
     return jsonify({'status': 'error', 'message': 'Không tìm thấy bot.'})
 
 @app.route("/api/event_grab_toggle", methods=['POST'])
@@ -684,14 +612,12 @@ def api_event_grab_toggle():
     global event_grab_enabled
     event_grab_enabled = not event_grab_enabled
     save_main_settings()
-    return jsonify({
-        'status': 'success', 
-        'message': f"Event Grab đã {'BẬT' if event_grab_enabled else 'TẮT'}",
-        'reload': True
-    })
+    return jsonify({'status': 'success', 'message': f"Event Grab đã {'BẬT' if event_grab_enabled else 'TẮT'}", 'reload': True})
 
 if __name__ == "__main__":
     print("Đang tải cấu hình...", flush=True)
+    # --- <<< MODIFIED: Load both settings files >>> ---
+    load_main_settings()
     load_farm_settings()
     
     print("Đang khởi tạo các main bots...", flush=True)
