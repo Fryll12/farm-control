@@ -194,9 +194,11 @@ def grab_processor_loop():
                     grab_data = None
             
             if grab_data:
-                heart_numbers = grab_data['heart_numbers']
-                max_num = max(heart_numbers)
-                target_server = grab_data['target_server']
+                # Lấy dữ liệu ra các biến cục bộ ngay lập tức
+                current_heart_numbers = grab_data['heart_numbers']
+                current_max_num = max(current_heart_numbers)
+                current_target_server = grab_data['target_server']
+                current_grab_data = grab_data
                 
                 # Xử lý grab cho từng bot
                 with bots_lock:
@@ -204,28 +206,30 @@ def grab_processor_loop():
                         if not bot_active_states.get(f'main_{bot_index}', False):
                             continue
                             
-                        is_enabled, threshold, delays = get_grab_settings(target_server, 'main', bot_index)
+                        is_enabled, threshold, delays = get_grab_settings(current_target_server, 'main', bot_index)
                         
-                        if is_enabled and max_num >= threshold:
-                            max_index = heart_numbers.index(max_num)
+                        if is_enabled and current_max_num >= threshold:
+                            max_index = current_heart_numbers.index(current_max_num)
                             emoji = ["1️⃣", "2️⃣", "3️⃣"][max_index]
                             delay = delays.get(max_index, 1.5)
-                            
-                            # Sử dụng delay có sẵn từ settings, không thêm spread delay
                             actual_delay = delay
                             
-                            def grab_action(bot_ref, bot_idx):
+                            # THAY ĐỔI 1: Hàm grab_action giờ nhận thêm dữ liệu cần thiết
+                            def grab_action(bot_ref, bot_idx, g_data, s_config, h_num):
                                 try:
-                                    bot_ref.addReaction(grab_data['channel_id'], grab_data['message_id'], emoji)
-                                    ktb_channel_id = target_server.get('ktb_channel_id')
+                                    # THAY ĐỔI 2: Sử dụng dữ liệu được truyền vào, không dùng biến bên ngoài
+                                    bot_ref.addReaction(g_data['channel_id'], g_data['message_id'], emoji)
+                                    ktb_channel_id = s_config.get('ktb_channel_id')
                                     if ktb_channel_id:
                                         time.sleep(2)
                                         bot_ref.sendMessage(ktb_channel_id, "kt b")
-                                    print(f"[FARM: {target_server['name']} | Bot {GREEK_ALPHABET[bot_idx] if bot_idx < len(GREEK_ALPHABET) else f'Main {bot_idx}'}] Grab -> {max_num} tim, delay {actual_delay}s", flush=True)
+                                    bot_name = GREEK_ALPHABET[bot_idx] if bot_idx < len(GREEK_ALPHABET) else f'Main {bot_idx}'
+                                    print(f"[FARM: {s_config['name']} | Bot {bot_name}] Grab -> {h_num} tim, delay {actual_delay}s", flush=True)
                                 except Exception as e:
                                     print(f"Lỗi grab bot {bot_idx}: {e}", flush=True)
                             
-                            threading.Timer(actual_delay, grab_action, args=(bot, bot_index)).start()
+                            # THAY ĐỔI 3: Truyền dữ liệu (g_data, s_config, h_num) vào Timer
+                            threading.Timer(actual_delay, grab_action, args=(bot, bot_index, current_grab_data, current_target_server, current_max_num)).start()
             
             time.sleep(0.1)  # Giảm CPU usage
         except Exception as e:
