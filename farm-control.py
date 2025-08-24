@@ -1,6 +1,4 @@
-# PHIÊN BẢN ĐIỀU KHIỂN FARM - NÂNG CẤP VỚI DISCORD.PY-SELF - FULL CODE
-import discord_self as discord
-from discord_self.ext import commands, tasks
+import discord
 import threading
 import time
 import os
@@ -8,21 +6,16 @@ import random
 import re
 import requests
 import json
+import asyncio
 from flask import Flask, request, render_template_string, jsonify
 from dotenv import load_dotenv
 from concurrent.futures import ThreadPoolExecutor
 import queue
-import asyncio
-import aiohttp
-import logging
-
-# Tắt logging để giảm noise
-logging.getLogger('discord_self').setLevel(logging.WARNING)
 
 load_dotenv()
 
 # --- CẤU HÌNH ---
-main_token_alpha = os.getenv("MAIN_TOKEN")
+main_token_alpha = os.getenv("MAIN_TOKEN") # Acc Alpha có env riêng
 other_main_tokens = os.getenv("MAIN_TOKENS").split(",") if os.getenv("MAIN_TOKENS") else []
 sub_tokens = os.getenv("TOKENS").split(",") if os.getenv("TOKENS") else []
 acc_names_str = os.getenv("SUB_ACC_NAMES")
@@ -45,152 +38,29 @@ bots_lock = threading.Lock()
 server_start_time = time.time()
 bot_active_states = {}
 
+# Dữ liệu mới
 farm_servers = []
-groups = {}
+groups = {} # Ví dụ: {'Group A': {'spam_enabled': False, 'spam_accounts': [0, 2]}}
 main_panel_settings = {
     "auto_grab_enabled_alpha": False, "heart_threshold_alpha": 15,
     "auto_grab_enabled_main_other": False, "heart_threshold_main_other": 50,
     "spam_message": "kcf", "spam_delay": 10
 }
 
-heart_sharing_data = {}
+# Biến chia sẻ thông tin tim giữa các bot
+heart_sharing_data = {}  # {channel_id: {'hearts': [num1, num2, num3], 'timestamp': time, 'drop_msg_id': str}}
 heart_data_lock = threading.Lock()
 
+# SPAM OPTIMIZATION - Thread Pool thay vì tạo thread mới liên tục
 spam_executor = ThreadPoolExecutor(max_workers=20, thread_name_prefix="SpamWorker")
-active_spam_tasks = set()
+spam_queue = queue.Queue()
+active_spam_tasks = set()  # Theo dõi các task đang chạy
 
-# --- DISCORD BOT CLASS (Đã chỉnh sửa cho self-bot) ---
-class FarmBot(commands.Bot):
-    def __init__(self, bot_type, bot_index, *args, **kwargs):
-        super().__init__(
-            command_prefix='!', 
-            help_command=None,
-            self_bot=True,
-            *args, **kwargs
-        )
-        self.bot_type = bot_type
-        self.bot_index = bot_index
-        self.is_ready = False
-        
-    async def on_ready(self):
-        self.is_ready = True
-        bot_name = GREEK_ALPHABET[self.bot_index] if self.bot_type == 'main' and self.bot_index < len(GREEK_ALPHABET) else f"{self.bot_type.capitalize()} {self.bot_index}"
-        print(f"User Account '{bot_name}' đã đăng nhập: {self.user}", flush=True)
-        
-    async def on_message(self, message):
-        if message.author == self.user:
-            return
-        if message.author.bot:
-            await self.handle_farm_grab(message)
-        await self.process_commands(message)
+# Discord.py-self intents configuration
+intents = discord.Intents.default()
+intents.message_content = True
 
-    async def handle_farm_grab(self, message):
-        channel_id = message.channel.id
-        target_server = next((s for s in farm_servers if s.get('main_channel_id') == str(channel_id)), None)
-        if not target_server:
-            return
-
-        if message.author.id == karuta_id and 'dropping 3' in message.content:
-            last_drop_msg_id = message.id
-
-            if self.bot_type == 'main' and self.bot_index == 0:
-                is_card_grab_enabled, _, _ = self.get_grab_settings(target_server)
-                ktb_channel_id = target_server.get('ktb_channel_id')
-                if is_card_grab_enabled and ktb_channel_id:
-                    asyncio.create_task(self.read_yoru_and_share_hearts(message.channel, last_drop_msg_id, target_server))
-
-            elif self.bot_type == 'main' and self.bot_index > 0:
-                await asyncio.sleep(0.6)
-                await self.process_shared_hearts(channel_id)
-
-            if event_grab_enabled and self.bot_type == 'main' and self.bot_index == 0:
-                asyncio.create_task(self.check_farm_event(message.channel, last_drop_msg_id, target_server))
-
-    def get_grab_settings(self, target_server):
-        if self.bot_type == 'main' and self.bot_index == 0:
-            return (target_server.get('auto_grab_enabled_alpha', False), 
-                    target_server.get('heart_threshold_alpha', 15), 
-                    {0: 0.2, 1: 1.2, 2: 2.0})
-        elif self.bot_type == 'main':
-            return (target_server.get('auto_grab_enabled_main_other', False), 
-                    target_server.get('heart_threshold_main_other', 50), 
-                    {0: 1.0, 1: 2.0, 2: 2.8})
-        else:
-            return False, 0, {}
-
-    async def read_yoru_and_share_hearts(self, channel, drop_msg_id, target_server):
-        try:
-            await asyncio.sleep(0.6)
-            messages = [msg async for msg in channel.history(limit=5)]
-            for msg in messages:
-                if msg.author.id == yoru_bot_id and msg.embeds:
-                    desc = msg.embeds[0].description or ""
-                    heart_numbers = [int(match.group(1)) if (match := re.search(r'♡(\d+)', line)) else 0 for line in desc.split('\n')[:3]]
-                    if not any(heart_numbers): break
-                    
-                    with heart_data_lock:
-                        heart_sharing_data[channel.id] = {
-                            'hearts': heart_numbers,
-                            'timestamp': time.time(),
-                            'drop_msg_id': drop_msg_id,
-                            'target_server': target_server,
-                            'processed_by': {0}
-                        }
-                    
-                    print(f"[ALPHA SHARED HEARTS: {target_server['name']}] Tim: {heart_numbers}", flush=True)
-                    await self.execute_grab(channel, drop_msg_id, target_server, heart_numbers)
-                    break
-        except Exception as e:
-            print(f"Lỗi đọc Yoru Bot: {e}", flush=True)
-
-    async def process_shared_hearts(self, channel_id):
-        # Đây là phiên bản cho phép nhiều bot cùng grab để dự phòng cooldown
-        with heart_data_lock:
-            if channel_id not in heart_sharing_data:
-                return
-            data = heart_sharing_data[channel_id]
-        
-        channel = self.get_channel(channel_id)
-        if channel:
-            await self.execute_grab(channel, data['drop_msg_id'], data['target_server'], data['hearts'])
-
-    async def execute_grab(self, channel, drop_msg_id, target_server, heart_numbers):
-        is_card_grab_enabled, heart_threshold, delays = self.get_grab_settings(target_server)
-        ktb_channel_id = target_server.get('ktb_channel_id')
-
-        if is_card_grab_enabled and ktb_channel_id and any(heart_numbers):
-            max_num = max(heart_numbers)
-            if max_num >= heart_threshold:
-                max_index = heart_numbers.index(max_num)
-                emoji = ["1️⃣", "2️⃣", "3️⃣"][max_index]
-                delay = delays.get(max_index, 1.5)
-                
-                bot_name = GREEK_ALPHABET[self.bot_index] if self.bot_type == 'main' and self.bot_index < len(GREEK_ALPHABET) else f"{self.bot_type.capitalize()} {self.bot_index}"
-                print(f"[FARM: {target_server['name']} | Acc {bot_name}] Grab -> {max_num} tim, delay {delay}s", flush=True)
-                
-                await asyncio.sleep(delay)
-                try:
-                    message = await channel.fetch_message(drop_msg_id)
-                    await message.add_reaction(emoji)
-                    await asyncio.sleep(2)
-                    ktb_channel = self.get_channel(int(ktb_channel_id))
-                    if ktb_channel:
-                        await ktb_channel.send("kt b")
-                except Exception as e:
-                    print(f"Lỗi khi grab [{bot_name}]: {e}", flush=True)
-
-    async def check_farm_event(self, channel, drop_msg_id, target_server):
-        try:
-            await asyncio.sleep(5)
-            message = await channel.fetch_message(drop_msg_id)
-            for reaction in message.reactions:
-                if str(reaction.emoji) == '🍉':
-                    print(f"[EVENT GRAB | FARM: {target_server['name']}] Phát hiện dưa hấu! Alpha Acc nhặt.", flush=True)
-                    await message.add_reaction('🍉')
-                    break
-        except Exception as e:
-            print(f"Lỗi kiểm tra event: {e}", flush=True)
-
+# --- HÀM LƯU VÀ TẢI CÀI ĐẶT ---
 def save_farm_settings():
     api_key = os.getenv("JSONBIN_API_KEY"); farm_bin_id = os.getenv("FARM_JSONBIN_BIN_ID")
     if not api_key or not farm_bin_id: return
@@ -214,7 +84,7 @@ def load_farm_settings():
             if isinstance(data, list): farm_servers = data
             print(f"[Farm Settings] Đã tải {len(farm_servers)} cấu hình farm.", flush=True)
     except Exception: farm_servers = []
-
+        
 def save_main_settings():
     api_key = os.getenv("JSONBIN_API_KEY"); bin_id = os.getenv("JSONBIN_BIN_ID")
     if not api_key or not bin_id: return
@@ -222,7 +92,8 @@ def save_main_settings():
         'event_grab_enabled': event_grab_enabled, 'auto_reboot_enabled': auto_reboot_enabled, 
         'auto_reboot_delay': auto_reboot_delay, 'bot_active_states': bot_active_states,
         'last_reboot_cycle_time': last_reboot_cycle_time,
-        'groups': groups, 'main_panel_settings': main_panel_settings
+        'groups': groups, # Lưu cấu hình group
+        'main_panel_settings': main_panel_settings # Lưu panel chính
     }
     headers = {'Content-Type': 'application/json', 'X-Master-Key': api_key}
     url = f"https://api.jsonbin.io/v3/b/{bin_id}"
@@ -242,6 +113,7 @@ def load_main_settings():
             settings = req.json().get("record", {})
             if settings:
                 globals().update(settings)
+                # Đảm bảo các key mới tồn tại
                 if 'groups' not in globals() or not isinstance(globals()['groups'], dict): globals()['groups'] = {}
                 if 'main_panel_settings' not in globals() or not isinstance(globals()['main_panel_settings'], dict):
                     globals()['main_panel_settings'] = {
@@ -253,56 +125,247 @@ def load_main_settings():
             else: save_main_settings()
     except Exception as e: print(f"[Settings] Lỗi khi tải cài đặt chính: {e}", flush=True)
 
-def create_bot(token, bot_type, bot_index):
-    bot = FarmBot(bot_type, bot_index)
-    
-    def run_it():
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            loop.run_until_complete(bot.start(token))
-        except Exception as e:
-            print(f"Lỗi khi chạy bot {bot_type} {bot_index}: {e}", flush=True)
+# --- LOGIC BOT FARM OPTIMIZED ---
+def get_grab_settings(target_server, bot_type, bot_index):
+    if bot_type == 'main' and bot_index == 0: # Alpha Bot
+        return target_server.get('auto_grab_enabled_alpha', False), target_server.get('heart_threshold_alpha', 15), {0: 0.2, 1: 1.2, 2: 2.0}
+    elif bot_type == 'main': # Other Main Bots
+        return target_server.get('auto_grab_enabled_main_other', False), target_server.get('heart_threshold_main_other', 50), {0: 1.0, 1: 2.0, 2: 2.8}
+    else: # Sub Bots - KHÔNG CÓ AUTO GRAB
+        return False, 0, {}
 
-    thread = threading.Thread(target=run_it, daemon=True)
-    thread.start()
-    
-    start_time = time.time()
-    while not bot.is_ready and (time.time() - start_time) < 30:
-        time.sleep(0.5)
+async def read_yoru_and_share_hearts(bot, channel_id, drop_msg_id, target_server):
+    """Chỉ Alpha bot đọc Yoru và chia sẻ thông tin tim cho các bot khác"""
+    try:
+        await asyncio.sleep(0.6)
+        channel = bot.get_channel(channel_id)
+        if channel:
+            messages = []
+            async for message in channel.history(limit=5):
+                messages.append(message)
+                
+            for message in messages:
+                if message.author.id == yoru_bot_id and message.embeds:
+                    desc = message.embeds[0].description
+                    if desc:
+                        heart_numbers = []
+                        for line in desc.split('\n')[:3]:
+                            match = re.search(r'♡(\d+)', line)
+                            heart_numbers.append(int(match.group(1)) if match else 0)
+                        
+                        if not any(heart_numbers): break
+                        
+                        # Chia sẻ thông tin tim với các bot khác
+                        with heart_data_lock:
+                            heart_sharing_data[channel_id] = {
+                                'hearts': heart_numbers,
+                                'timestamp': time.time(),
+                                'drop_msg_id': drop_msg_id,
+                                'target_server': target_server
+                            }
+                        
+                        print(f"[ALPHA SHARED HEARTS: {target_server['name']}] Tim: {heart_numbers}", flush=True)
+                        break
+    except Exception as e: 
+        print(f"Lỗi đọc Yoru Bot: {e}", flush=True)
+
+async def process_shared_hearts(bot, bot_type, bot_index):
+    """Các bot main khác xử lý thông tin tim được chia sẻ từ Alpha"""
+    with heart_data_lock:
+        for channel_id, data in list(heart_sharing_data.items()):
+            # Chỉ xử lý dữ liệu trong vòng 10 giây
+            if time.time() - data['timestamp'] > 10:
+                del heart_sharing_data[channel_id]
+                continue
+                
+            target_server = data['target_server']
+            heart_numbers = data['hearts']
+            drop_msg_id = data['drop_msg_id']
+            
+            is_card_grab_enabled, heart_threshold, delays = get_grab_settings(target_server, bot_type, bot_index)
+            ktb_channel_id = target_server.get('ktb_channel_id')
+
+            if is_card_grab_enabled and ktb_channel_id and any(heart_numbers):
+                max_num = max(heart_numbers)
+                if max_num >= heart_threshold:
+                    max_index = heart_numbers.index(max_num)
+                    emoji = ["1️⃣", "2️⃣", "3️⃣"][max_index]
+                    delay = delays.get(max_index, 1.5)
+                    print(f"[FARM: {target_server['name']} | Bot {bot_type.capitalize()} {bot_index}] Grab -> {max_num} tim, delay {delay}s", flush=True)
+                    
+                    def grab_action():
+                        try:
+                            loop = asyncio.new_event_loop()
+                            asyncio.set_event_loop(loop)
+                            
+                            async def do_grab():
+                                try:
+                                    channel = bot.get_channel(channel_id)
+                                    ktb_channel = bot.get_channel(int(ktb_channel_id))
+                                    
+                                    if channel and ktb_channel:
+                                        message = await channel.fetch_message(drop_msg_id)
+                                        await message.add_reaction(emoji)
+                                        await asyncio.sleep(2)
+                                        await ktb_channel.send("kt b")
+                                except Exception as e:
+                                    print(f"Lỗi khi grab: {e}", flush=True)
+                            
+                            loop.run_until_complete(do_grab())
+                            loop.close()
+                        except Exception as e:
+                            print(f"Lỗi grab_action: {e}", flush=True)
+                    
+                    threading.Timer(delay, grab_action).start()
+                    # Xóa dữ liệu sau khi đã xử lý
+                    del heart_sharing_data[channel_id]
+
+class FarmClient(discord.Client):
+    def __init__(self, bot_type, bot_index, **options):
+        super().__init__(**options)
+        self.bot_type = bot_type
+        self.bot_index = bot_index
         
-    return bot
+    async def on_ready(self):
+        print(f"Bot '{self.bot_type.capitalize()} {self.bot_index}' đã đăng nhập: {self.user.name}", flush=True)
+        
+    async def on_message(self, message):
+        # Tránh xử lý tin nhắn của chính bot
+        if message.author == self.user:
+            return
+            
+        await self.handle_farm_grab(message)
+        
+    async def handle_farm_grab(self, message):
+        channel_id = message.channel.id
+        target_server = next((s for s in farm_servers if s.get('main_channel_id') == str(channel_id)), None)
+        if not target_server: return
 
+        if message.author.id == karuta_id and 'dropping 3' in message.content:
+            last_drop_msg_id = message.id
+
+            # CHỈ ALPHA BOT ĐỌC YORU VÀ CHIA SẺ
+            if self.bot_type == 'main' and self.bot_index == 0:
+                is_card_grab_enabled, heart_threshold, delays = get_grab_settings(target_server, self.bot_type, self.bot_index)
+                ktb_channel_id = target_server.get('ktb_channel_id')
+
+                if is_card_grab_enabled and ktb_channel_id:
+                    asyncio.create_task(read_yoru_and_share_hearts(self, channel_id, last_drop_msg_id, target_server))
+
+            # CÁC BOT MAIN KHÁC XỬ LÝ THÔNG TIN ĐƯỢC CHIA SẺ
+            elif self.bot_type == 'main' and self.bot_index > 0:
+                # Đợi một chút để Alpha bot đọc xong
+                async def delayed_process():
+                    await asyncio.sleep(1.2)
+                    await process_shared_hearts(self, self.bot_type, self.bot_index)
+                asyncio.create_task(delayed_process())
+
+            # EVENT GRAB CHỈ CHO ALPHA BOT
+            if event_grab_enabled and self.bot_type == 'main' and self.bot_index == 0:
+                async def check_farm_event():
+                    try:
+                        await asyncio.sleep(5)
+                        channel = self.get_channel(channel_id)
+                        if channel:
+                            message_obj = await channel.fetch_message(last_drop_msg_id)
+                            for reaction in message_obj.reactions:
+                                if str(reaction.emoji) == '🍉':
+                                    print(f"[EVENT GRAB | FARM: {target_server['name']}] Phát hiện dưa hấu! Alpha Bot nhặt.", flush=True)
+                                    await message_obj.add_reaction("🍉")
+                                    break
+                    except Exception as e: print(f"Lỗi kiểm tra event: {e}", flush=True)
+                asyncio.create_task(check_farm_event())
+
+def create_bot(token, bot_type, bot_index):
+    """Tạo bot với discord.py-self"""
+    try:
+        intents = discord.Intents.default()
+        intents.message_content = True
+        
+        bot = FarmClient(bot_type, bot_index, intents=intents)
+        
+        # Chạy bot trong thread riêng
+        def run_bot():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                loop.run_until_complete(bot.start(token))
+            except Exception as e:
+                print(f"Lỗi khởi chạy bot {bot_type} {bot_index}: {e}", flush=True)
+            finally:
+                loop.close()
+                
+        threading.Thread(target=run_bot, daemon=True).start()
+        return bot
+        
+    except Exception as e:
+        print(f"Lỗi tạo bot {bot_type} {bot_index}: {e}", flush=True)
+        return None
+
+# --- CÁC VÒNG LẶP NỀN OPTIMIZED ---
 def execute_spam_task(task_data):
+    """Thực thi spam task - chạy trong ThreadPool"""
     try:
         task_id, channel_id, message, bots_to_use, inter_bot_delay = task_data
+        print(f"[SPAM EXEC] Bắt đầu task {task_id} với {len(bots_to_use)} bots", flush=True)
+        
         for bot in bots_to_use:
             try:
-                if bot.is_ready:
-                    channel = bot.get_channel(int(channel_id))
-                    if channel:
-                        # Cách an toàn để gọi hàm async từ thread khác
-                        asyncio.run_coroutine_threadsafe(channel.send(message), bot.loop)
+                # Tạo task spam async
+                def spam_single():
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    
+                    async def do_spam():
+                        try:
+                            channel = bot.get_channel(int(channel_id))
+                            if channel:
+                                await channel.send(message)
+                        except Exception as e:
+                            print(f"Lỗi spam bot: {e}", flush=True)
+                    
+                    loop.run_until_complete(do_spam())
+                    loop.close()
+                
+                spam_single()
                 time.sleep(inter_bot_delay)
             except Exception as e:
                 print(f"[SPAM ERROR] Bot spam failed: {e}", flush=True)
+    except Exception as e:
+        print(f"[SPAM ERROR] Task execution failed: {e}", flush=True)
     finally:
+        # Xóa task khỏi active set
         if task_id in active_spam_tasks:
             active_spam_tasks.remove(task_id)
 
 def optimized_spam_loop():
+    """Loop spam được tối ưu - sử dụng ThreadPool"""
+    print("[SPAM] Khởi động Optimized Spam Loop với ThreadPool", flush=True)
+    
     while True:
         try:
             now = time.time()
+            
+            # Lặp qua các group để điều phối spam
             for group_name, group_data in groups.items():
-                if not group_data.get('spam_enabled', False): continue
+                if not group_data.get('spam_enabled', False): 
+                    continue
+                
+                # Tìm các farm thuộc group này
                 farms_in_group = [s for s in farm_servers if s.get('group') == group_name]
-                if not farms_in_group: continue
+                if not farms_in_group: 
+                    continue
+
+                # Chọn các bot được chỉ định cho group này
                 with bots_lock:
                     account_indices = group_data.get('spam_accounts', [])
-                    bots_to_use = [sub_bots[i] for i in account_indices if i < len(sub_bots) and bot_active_states.get(f'sub_{i}', False) and sub_bots[i].is_ready]
-                if not bots_to_use: continue
+                    bots_to_use = [sub_bots[i] for i in account_indices 
+                                 if i < len(sub_bots) and bot_active_states.get(f'sub_{i}', False)]
                 
+                if not bots_to_use: 
+                    continue
+
+                # Batch xử lý các farm cần spam
                 spam_batch = []
                 for server in farms_in_group:
                     server_id = server.get('id', 'unknown_farm')
@@ -310,19 +373,38 @@ def optimized_spam_loop():
                         last_spam = server.get('last_spam_time', 0)
                         delay = server.get('spam_delay', 10)
                         task_id = f"spam_{server_id}_{group_name}"
+                        
+                        # Kiểm tra điều kiện spam
                         if (now - last_spam) >= delay and task_id not in active_spam_tasks:
-                            spam_batch.append({'task_id': task_id, 'channel_id': server['spam_channel_id'], 'message': server['spam_message'], 'server': server})
-                
-                for spam_task in spam_batch:
+                            spam_batch.append({
+                                'task_id': task_id,
+                                'channel_id': server['spam_channel_id'],
+                                'message': server['spam_message'],
+                                'server': server
+                            })
+
+                # Submit batch tasks vào ThreadPool
+                for spam_task in spam_batch[:5]:  # Giới hạn 5 task/batch để không quá tải
                     task_id = spam_task['task_id']
                     active_spam_tasks.add(task_id)
                     spam_task['server']['last_spam_time'] = now
-                    task_data = (task_id, spam_task['channel_id'], spam_task['message'], bots_to_use.copy(), 2)
+                    
+                    task_data = (
+                        task_id,
+                        spam_task['channel_id'], 
+                        spam_task['message'],
+                        bots_to_use.copy(), # Copy để tránh race condition
+                        2  # inter_bot_delay
+                    )
+                    
+                    # Submit vào ThreadPool thay vì tạo thread mới
                     spam_executor.submit(execute_spam_task, task_data)
-            time.sleep(2)
+                    
+            time.sleep(2)  # Tăng delay để giảm CPU usage
+            
         except Exception as e: 
             print(f"[ERROR in optimized_spam_loop] {e}", flush=True)
-            time.sleep(5)
+            time.sleep(5)  # Nghỉ lâu hơn khi có lỗi
 
 def reboot_bot(target_id):
     with bots_lock:
@@ -330,17 +412,26 @@ def reboot_bot(target_id):
         index = int(index_str)
         if bot_type == 'main':
             if index < len(main_bots):
-                try: asyncio.run(main_bots[index].close())
+                try: 
+                    # Đóng bot cũ
+                    if main_bots[index]:
+                        asyncio.run_coroutine_threadsafe(main_bots[index].close(), main_bots[index].loop)
                 except: pass
+                
                 token = main_token_alpha if index == 0 else other_main_tokens[index - 1]
                 main_bots[index] = create_bot(token, 'main', index)
-                print(f"[Reboot] Main Acc {index} đã khởi động lại.", flush=True)
+                print(f"[Reboot] Main Bot {index} đã khởi động lại.", flush=True)
+                
         elif bot_type == 'sub':
             if index < len(sub_bots):
-                try: asyncio.run(sub_bots[index].close())
+                try: 
+                    # Đóng bot cũ
+                    if sub_bots[index]:
+                        asyncio.run_coroutine_threadsafe(sub_bots[index].close(), sub_bots[index].loop)
                 except: pass
+                
                 sub_bots[index] = create_bot(sub_tokens[index], 'sub', index)
-                print(f"[Reboot] Sub Acc {index} đã khởi động lại.", flush=True)
+                print(f"[Reboot] Sub Bot {index} đã khởi động lại.", flush=True)
 
 def auto_reboot_loop():
     global last_reboot_cycle_time
@@ -350,42 +441,29 @@ def auto_reboot_loop():
                 print("[Reboot] Bắt đầu chu kỳ reboot tự động...", flush=True)
                 with bots_lock:
                     for i in range(len(main_bots)):
-                        if bot_active_states.get(f'main_{i}', False): 
-                            reboot_bot(f'main_{i}')
-                            time.sleep(5)
+                        if bot_active_states.get(f'main_{i}', False): reboot_bot(f'main_{i}'); time.sleep(5)
                     for i in range(len(sub_bots)):
-                         if bot_active_states.get(f'sub_{i}', False): 
-                            reboot_bot(f'sub_{i}')
-                            time.sleep(5)
+                         if bot_active_states.get(f'sub_{i}', False): reboot_bot(f'sub_{i}'); time.sleep(5)
                 last_reboot_cycle_time = time.time()
             if auto_reboot_stop_event.wait(timeout=60): break
         except Exception as e: print(f"[ERROR in auto_reboot_loop] {e}", flush=True); time.sleep(60)
+    print("[Reboot] Luồng tự động reboot đã dừng.", flush=True)
 
 def periodic_save_loop():
     while True:
-        time.sleep(300)
-        save_farm_settings()
-        save_main_settings()
-
-def heart_data_cleanup():
-    while True:
-        time.sleep(15)
-        with heart_data_lock:
-            current_time = time.time()
-            expired_keys = [k for k, v in heart_sharing_data.items() if current_time - v.get('timestamp', 0) > 30]
-            for key in expired_keys:
-                if key in heart_sharing_data:
-                    del heart_sharing_data[key]
+        time.sleep(300); print("[Settings] Bắt đầu lưu định kỳ...", flush=True)
+        save_farm_settings(); save_main_settings()
 
 app = Flask(__name__)
 
+# --- GIAO DIỆN WEB ---
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="vi">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Karuta Farm Control - Self-Bot</title>
+    <title>Karuta Farm Control - Discord.py-self Optimized</title>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&family=Courier+Prime:wght@400;700&family=Nosifer&display=swap" rel="stylesheet">
     <style>
@@ -422,12 +500,30 @@ HTML_TEMPLATE = """
         .msg-status { text-align: center; color: var(--shadow-cyan); padding: 12px; border: 1px dashed var(--border-color); margin-bottom: 20px; background: rgba(0, 139, 139, 0.1); display: none; }
         .main-panel { border: 2px solid var(--main-blue); box-shadow: 0 0 15px var(--main-blue); }
         .delete-btn { background: var(--blood-red); color: white; border: none; cursor: pointer; padding: 2px 6px; border-radius: 4px; }
+        .optimization-notice { background: rgba(34, 139, 34, 0.1); border: 1px solid var(--necro-green); padding: 10px; margin-bottom: 20px; border-radius: 5px; }
+        .optimization-notice i { color: var(--necro-green); margin-right: 10px; }
+        .spam-status { font-size: 0.8em; padding: 2px 6px; border-radius: 3px; margin-left: 10px; }
+        .spam-on { background-color: var(--necro-green); color: #000; }
+        .spam-off { background-color: var(--blood-red); color: #fff; }
+        .farm-spam-indicator { display: inline-block; margin-left: 10px; font-size: 0.9em; }
     </style>
 </head>
 <body>
     <div class="container">
-        <div class="header"><h1 class="title">FARM CONTROL PANEL - SELF BOT</h1></div>
+        <div class="header"><h1 class="title">FARM CONTROL PANEL - DISCORD.PY-SELF</h1></div>
+        
+        <div class="optimization-notice">
+            <i class="fas fa-microchip"></i><strong>DISCORD.PY-SELF VERSION:</strong> 
+            Chỉ Alpha Bot đọc tim từ Yoru, sau đó chia sẻ cho các Main Bot khác. 
+            Sub Accounts chỉ dùng để SPAM. TẤT CẢ MAIN BOT ĐỀU NHẶT!
+            <br><i class="fas fa-server"></i><strong>SPAM OPTIMIZED:</strong>
+            Sử dụng ThreadPool (20 workers) thay vì tạo thread mới → Tiết kiệm RAM đáng kể!
+            <br><i class="fas fa-broadcast-tower"></i><strong>SPAM STATUS:</strong> 
+            Hiển thị trạng thái spam ON/OFF cho từng farm và group.
+        </div>
+        
         <div id="msg-status-container" class="msg-status"></div>
+
         <div class="panel">
             <h2><i class="fas fa-server"></i> System Status & Global Controls</h2>
             <div class="main-grid">
@@ -442,6 +538,7 @@ HTML_TEMPLATE = """
                 </div>
             </div>
         </div>
+        
         <div class="panel main-panel">
             <h2><i class="fas fa-crown"></i> Main Control Panel (Template)</h2>
             <div class="main-grid">
@@ -451,7 +548,7 @@ HTML_TEMPLATE = """
                     <div class="input-group"><label>BETA+</label><input type="number" class="main-panel-input" data-field="heart_threshold_main_other" value="{{ main_panel.heart_threshold_main_other }}"><button class="btn main-panel-toggle" data-field="auto_grab_enabled_main_other">{{ 'TẮT' if main_panel.auto_grab_enabled_main_other else 'BẬT' }}</button></div>
                     <div style="opacity: 0.5;"><small><i class="fas fa-info-circle"></i> Sub Accounts không có auto grab (chỉ spam)</small></div>
                 </div>
-                <div>
+                 <div>
                     <h4><i class="fas fa-broadcast-tower"></i> Broadcast Settings</h4>
                     <div class="input-group"><label>Message</label><textarea class="main-panel-input" data-field="spam_message" rows="2">{{ main_panel.spam_message }}</textarea></div>
                     <div class="input-group"><label>Delay</label><input type="number" class="main-panel-input" data-field="spam_delay" value="{{ main_panel.spam_delay }}"></div>
@@ -463,6 +560,7 @@ HTML_TEMPLATE = """
                 </div>
             </div>
         </div>
+
         <div class="panel">
             <h2><i class="fas fa-layer-group"></i> Group & Farm Management</h2>
             <div class="input-group" style="width: 50%;">
@@ -473,7 +571,11 @@ HTML_TEMPLATE = """
                 {% for name, data in groups.items() %}
                 <div class="group-container" data-group-name="{{ name }}">
                     <div class="group-header">
-                        <h3>{{ name }}</h3>
+                        <h3>{{ name }}
+                            <span class="spam-status {{ 'spam-on' if data.spam_enabled else 'spam-off' }}">
+                                SPAM {{ 'ON' if data.spam_enabled else 'OFF' }}
+                            </span>
+                        </h3>
                         <div>
                             <button class="btn group-spam-toggle {{ 'btn-danger' if data.spam_enabled else 'btn-success' }}">{{ 'TẮT SPAM' if data.spam_enabled else 'BẬT SPAM' }}</button>
                             <button class="btn btn-danger delete-group-btn">Xóa Group</button>
@@ -488,25 +590,47 @@ HTML_TEMPLATE = """
                     <h4 style="margin-top: 20px;"><i class="fas fa-network-wired"></i> Farms in this Group</h4>
                     <div class="farms-list">
                         {% for server in farm_servers %}{% if server.group == name %}
-                        <div class="farm-in-group"><span>{{ server.name }}</span><select class="farm-group-selector" data-farm-id="{{ server.id }}">
-                            {% for g_name in groups %}<option value="{{ g_name }}" {% if g_name == name %}selected{% endif %}>{{ g_name }}</option>{% endfor %}
-                        </select></div>
+                        <div class="farm-in-group">
+                            <span>{{ server.name }}
+                                <span class="farm-spam-indicator">
+                                    {% if server.get('spam_channel_id') and server.get('spam_message') %}
+                                        <span class="spam-status spam-on">SPAM READY</span>
+                                    {% else %}
+                                        <span class="spam-status spam-off">SPAM NOT SET</span>
+                                    {% endif %}
+                                </span>
+                            </span>
+                            <select class="farm-group-selector" data-farm-id="{{ server.id }}">
+                                {% for g_name in groups %}<option value="{{ g_name }}" {% if g_name == name %}selected{% endif %}>{{ g_name }}</option>{% endfor %}
+                            </select>
+                        </div>
                         {% endif %}{% endfor %}
                     </div>
                 </div>
                 {% endfor %}
             </div>
         </div>
+        
         <div class="panel">
             <h2><i class="fas fa-plus-circle"></i> Add & Manage Farm Panels</h2>
             <div id="farm-grid" class="main-grid">
                 {% for server in farm_servers %}
                 <div class="panel" style="border-left: 5px solid var(--hot-pink);">
                     <button class="delete-btn delete-farm-btn" data-farm-id="{{ server.id }}" style="position:absolute; top:10px; right: 10px;">XÓA</button>
-                    <h3>{{ server.name }} (Group: {{ server.group or 'None' }})</h3>
+                    <h3>{{ server.name }} (Group: {{ server.group or 'None' }})
+                        <span class="farm-spam-indicator">
+                            {% if server.get('spam_channel_id') and server.get('spam_message') %}
+                                <span class="spam-status spam-on">SPAM ON</span>
+                            {% else %}
+                                <span class="spam-status spam-off">SPAM OFF</span>
+                            {% endif %}
+                        </span>
+                    </h3>
                     <div class="input-group"><label>Main CH</label><input type="text" class="farm-channel-input" data-farm-id="{{ server.id }}" data-field="main_channel_id" value="{{ server.main_channel_id or '' }}"></div>
                     <div class="input-group"><label>KTB CH</label><input type="text" class="farm-channel-input" data-farm-id="{{ server.id }}" data-field="ktb_channel_id" value="{{ server.ktb_channel_id or '' }}"></div>
                     <div class="input-group"><label>Spam CH</label><input type="text" class="farm-channel-input" data-farm-id="{{ server.id }}" data-field="spam_channel_id" value="{{ server.spam_channel_id or '' }}"></div>
+                    <div class="input-group"><label>Spam MSG</label><input type="text" class="farm-channel-input" data-farm-id="{{ server.id }}" data-field="spam_message" value="{{ server.spam_message or '' }}"></div>
+                    <div class="input-group"><label>Spam Delay</label><input type="number" class="farm-channel-input" data-farm-id="{{ server.id }}" data-field="spam_delay" value="{{ server.spam_delay or 10 }}"></div>
                 </div>
                 {% endfor %}
                 <div id="add-farm-btn" style="display:flex; align-items:center; justify-content:center; min-height:150px; border-style:dashed; cursor:pointer;"><i class="fas fa-plus" style="font-size: 3rem;"></i></div>
@@ -515,6 +639,7 @@ HTML_TEMPLATE = """
     </div>
 <script>
 document.addEventListener('DOMContentLoaded', function () {
+    // Helper functions
     const msgContainer = document.getElementById('msg-status-container');
     const showMsg = (msg) => { if (!msg) return; msgContainer.textContent = msg; msgContainer.style.display = 'block'; setTimeout(() => { msgContainer.style.display = 'none'; }, 4000); };
     const postData = async (url, data) => {
@@ -527,11 +652,14 @@ document.addEventListener('DOMContentLoaded', function () {
         } catch (error) { showMsg('Lỗi giao tiếp với server.'); }
     };
 
+    // --- Event Listeners ---
+    // Global controls
     document.getElementById('auto-reboot-toggle-btn').addEventListener('click', () => postData('/api/reboot_toggle_auto', { delay: document.getElementById('auto-reboot-delay').value }).then(r => r && r.reload ? null : location.reload()));
     document.getElementById('auto-reboot-delay').addEventListener('change', () => postData('/api/reboot_update_delay', { delay: document.getElementById('auto-reboot-delay').value }));
     document.getElementById('event-grab-toggle-btn').addEventListener('click', () => postData('/api/event_grab_toggle', {}).then(r => r && r.reload ? null : location.reload()));
     document.getElementById('bot-status-list').addEventListener('click', e => { if (e.target.matches('.btn-toggle-state')) { postData('/api/toggle_bot_state', { target: e.target.dataset.target }); setTimeout(fetchStatus, 500); }});
 
+    // Main panel & Sync
     const mainPanel = document.querySelector('.main-panel');
     mainPanel.addEventListener('change', e => { if (e.target.matches('.main-panel-input')) { const data = {}; data[e.target.dataset.field] = e.target.value; postData('/api/main_panel/update', data); } });
     mainPanel.addEventListener('click', e => { if (e.target.matches('.main-panel-toggle')) { const data = {}; data[e.target.dataset.field] = 'toggle'; postData('/api/main_panel/update', data).then(() => location.reload()); } });
@@ -541,13 +669,14 @@ document.addEventListener('DOMContentLoaded', function () {
         postData('/api/main_panel/sync', { target_groups: targets });
     });
 
+    // Group Management
     document.getElementById('add-group-btn').addEventListener('click', () => { const name = document.getElementById('new-group-name').value; if (name) postData('/api/groups/add', { name }); });
     const groupsContainer = document.getElementById('groups-container');
     groupsContainer.addEventListener('click', e => {
         const groupDiv = e.target.closest('.group-container');
         if (!groupDiv) return;
         const groupName = groupDiv.dataset.groupName;
-        if (e.target.matches('.delete-group-btn')) { if (confirm(`Xóa group "${groupName}"?`)) postData('/api/groups/delete', { name: groupName }); }
+        if (e.target.matches('.delete-group-btn')) { if (confirm(`Xóa group "${groupName}"? Các farm trong group sẽ bị mất group.`)) postData('/api/groups/delete', { name: groupName }); }
         if (e.target.matches('.group-spam-toggle')) { postData('/api/groups/update', { name: groupName, spam_enabled: 'toggle' }).then(() => location.reload()); }
     });
     groupsContainer.addEventListener('change', e => {
@@ -561,11 +690,13 @@ document.addEventListener('DOMContentLoaded', function () {
         if (e.target.matches('.farm-group-selector')) { postData('/api/farm/update', { farm_id: e.target.dataset.farmId, group: e.target.value }); }
     });
 
+    // Farm Management
     document.getElementById('add-farm-btn').addEventListener('click', () => { const name = prompt("Nhập tên farm mới:"); if (name) postData('/api/farm/add', { name }); });
     const farmGrid = document.getElementById('farm-grid');
     farmGrid.addEventListener('click', e => { if (e.target.matches('.delete-farm-btn')) { if (confirm('Xóa farm này?')) postData('/api/farm/delete', { farm_id: e.target.dataset.farmId }); } });
     farmGrid.addEventListener('change', e => { if (e.target.matches('.farm-channel-input')) { const data = { farm_id: e.target.dataset.farmId }; data[e.target.dataset.field] = e.target.value; postData('/api/farm/update', data); } });
 
+    // Initial Status Fetch
     async function fetchStatus() { 
         try {
             const response = await fetch('/status');
@@ -585,37 +716,43 @@ document.addEventListener('DOMContentLoaded', function () {
     }
     
     fetchStatus();
-    setInterval(fetchStatus, 10000);
+    setInterval(fetchStatus, 10000); // Update every 10 seconds
 });
 </script>
 </body>
 </html>
 """
-
+# --- FLASK ROUTES ---
 @app.route("/")
 def index():
     reboot_action, reboot_button_class = ("DISABLE REBOOT", "btn-danger") if auto_reboot_enabled else ("ENABLE REBOOT", "btn-success")
     event_grab_action, event_grab_button_class = ("DISABLE EVENT GRAB", "btn-danger") if event_grab_enabled else ("ENABLE EVENT GRAB", "btn-success")
+    
+    # Sắp xếp farm theo group để hiển thị
     sorted_farms = sorted(farm_servers, key=lambda x: x.get('group', 'zzzz'))
+
     return render_template_string(HTML_TEMPLATE,
         auto_reboot_delay=auto_reboot_delay, reboot_action=reboot_action, reboot_button_class=reboot_button_class,
         event_grab_action=event_grab_action, event_grab_button_class=event_grab_button_class,
-        farm_servers=sorted_farms, groups=groups, sub_acc_names=list(enumerate(sub_acc_names)),
+        farm_servers=sorted_farms,
+        groups=groups,
+        sub_acc_names=list(enumerate(sub_acc_names)),
         main_panel=main_panel_settings
     )
 
 @app.route("/status")
-def status():
+def status(): # Dùng chủ yếu để cập nhật trạng thái bot
     bot_status_list = []
     with bots_lock:
-        for i, bot in enumerate(main_bots):
+        for i in range(len(main_bots)):
             name = GREEK_ALPHABET[i] if i < len(GREEK_ALPHABET) else f"Main {i}"
             bot_status_list.append({"name": name, "reboot_id": f"main_{i}", "is_active": bot_active_states.get(f'main_{i}', False)})
-        for i, bot in enumerate(sub_bots):
+        for i in range(len(sub_bots)):
             name = sub_acc_names[i] if i < len(sub_acc_names) else f"Sub {i}"
             bot_status_list.append({"name": name, "reboot_id": f"sub_{i}", "is_active": bot_active_states.get(f'sub_{i}', False)})
     return jsonify({'bot_statuses': bot_status_list})
 
+# --- NEW API ENDPOINTS ---
 @app.route("/api/groups/add", methods=['POST'])
 def api_group_add():
     name = request.json.get('name')
@@ -630,8 +767,10 @@ def api_group_delete():
     name = request.json.get('name')
     if name and name in groups:
         del groups[name]
+        # Xóa group khỏi các farm
         for server in farm_servers:
-            if server.get('group') == name: server['group'] = None
+            if server.get('group') == name:
+                server['group'] = None
         save_main_settings(); save_farm_settings()
         return jsonify({'status': 'success', 'message': f'Đã xóa group "{name}".', 'reload': True})
     return jsonify({'status': 'error', 'message': 'Không tìm thấy group.'}), 404
@@ -662,16 +801,20 @@ def api_main_panel_update():
 def api_main_panel_sync():
     target_groups = request.json.get('target_groups', [])
     if not target_groups: return jsonify({'status': 'error', 'message': 'Chưa chọn group mục tiêu.'}), 400
+    
     sync_count = 0
     for server in farm_servers:
         if server.get('group') in target_groups:
+            # Sync Harvest
             server['auto_grab_enabled_alpha'] = main_panel_settings['auto_grab_enabled_alpha']
             server['heart_threshold_alpha'] = main_panel_settings['heart_threshold_alpha']
             server['auto_grab_enabled_main_other'] = main_panel_settings['auto_grab_enabled_main_other']
             server['heart_threshold_main_other'] = main_panel_settings['heart_threshold_main_other']
+            # Sync Broadcast
             server['spam_message'] = main_panel_settings['spam_message']
             server['spam_delay'] = main_panel_settings['spam_delay']
             sync_count += 1
+            
     save_farm_settings()
     return jsonify({'status': 'success', 'message': f'Đã đồng bộ cài đặt cho {sync_count} farm.'})
 
@@ -679,7 +822,10 @@ def api_main_panel_sync():
 def api_farm_add():
     name = request.json.get('name')
     if not name: return jsonify({'status': 'error', 'message': 'Tên farm là bắt buộc.'}), 400
+    
+    # Gán vào group đầu tiên nếu có, nếu không thì không gán
     default_group = next(iter(groups), None)
+
     new_server = {
         "id": f"farm_{int(time.time())}", "name": name, "group": default_group,
         "main_channel_id": "", "ktb_channel_id": "", "spam_channel_id": "",
@@ -702,17 +848,27 @@ def api_farm_update():
     data = request.json; farm_id = data.get('farm_id')
     server = next((s for s in farm_servers if s.get('id') == farm_id), None)
     if not server: return jsonify({'status': 'error', 'message': 'Không tìm thấy farm.'}), 404
-    for key in ['main_channel_id', 'ktb_channel_id', 'spam_channel_id', 'group']:
-        if key in data: server[key] = data[key]
+    
+    for key in ['main_channel_id', 'ktb_channel_id', 'spam_channel_id', 'group', 'spam_message', 'spam_delay']:
+        if key in data: 
+            if key == 'spam_delay':
+                server[key] = int(data[key]) if str(data[key]).isdigit() else 10
+            else:
+                server[key] = data[key]
+    
     save_farm_settings()
-    if 'group' in data: return jsonify({'status': 'success', 'message': 'Đã chuyển group cho farm.', 'reload': True})
-    return jsonify({'status': 'success', 'message': 'Đã cập nhật kênh cho farm.'})
+    if 'group' in data: return jsonify({'status': 'success', 'message': f'Đã chuyển group cho farm.', 'reload': True})
+    return jsonify({'status': 'success', 'message': f'Đã cập nhật cài đặt farm.'})
 
+# --- GLOBAL CONTROL API (giữ nguyên) ---
 @app.route("/api/reboot_toggle_auto", methods=['POST'])
 def api_reboot_toggle_auto():
     global auto_reboot_enabled, auto_reboot_thread, auto_reboot_stop_event, auto_reboot_delay
+    
+    # Cập nhật delay trước khi toggle
     new_delay = int(request.json.get("delay", auto_reboot_delay))
     auto_reboot_delay = new_delay
+    
     auto_reboot_enabled = not auto_reboot_enabled
     if auto_reboot_enabled and (auto_reboot_thread is None or not auto_reboot_thread.is_alive()):
         auto_reboot_stop_event = threading.Event()
@@ -720,6 +876,7 @@ def api_reboot_toggle_auto():
         auto_reboot_thread.start()
     elif not auto_reboot_enabled and auto_reboot_stop_event: 
         auto_reboot_stop_event.set(); auto_reboot_thread = None
+    
     save_main_settings()
     return jsonify({'status': 'success', 'message': f'Auto Reboot đã {"BẬT" if auto_reboot_enabled else "TẮT"} với delay {auto_reboot_delay}s.'})
 
@@ -753,16 +910,19 @@ def api_event_grab_toggle():
 if __name__ == "__main__":
     load_farm_settings()
     load_main_settings()
-    print("Đang khởi tạo các user account với Discord.py-self...", flush=True)
-    
+    print("Đang khởi tạo các bot với discord.py-self...", flush=True)
     with bots_lock:
+        # Khởi tạo Main bots
         if main_token_alpha:
             main_bots.append(create_bot(main_token_alpha, 'main', 0))
             if 'main_0' not in bot_active_states: bot_active_states['main_0'] = True
         for i, token in enumerate(other_main_tokens):
             if token.strip():
-                main_bots.append(create_bot(token.strip(), 'main', i + 1))
-                if f'main_{i+1}' not in bot_active_states: bot_active_states[f'main_{i+1}'] = True
+                bot_index = i + 1
+                main_bots.append(create_bot(token.strip(), 'main', bot_index))
+                if f'main_{bot_index}' not in bot_active_states: bot_active_states[f'main_{bot_index}'] = True
+        
+        # Khởi tạo Sub bots
         for i, token in enumerate(sub_tokens):
             if token.strip():
                 sub_bots.append(create_bot(token.strip(), 'sub', i))
@@ -771,7 +931,6 @@ if __name__ == "__main__":
     print("Đang khởi tạo các luồng nền...", flush=True)
     threading.Thread(target=optimized_spam_loop, daemon=True).start()
     threading.Thread(target=periodic_save_loop, daemon=True).start()
-    threading.Thread(target=heart_data_cleanup, daemon=True).start()
 
     if auto_reboot_enabled and (auto_reboot_thread is None or not auto_reboot_thread.is_alive()):
         auto_reboot_stop_event = threading.Event()
@@ -780,5 +939,9 @@ if __name__ == "__main__":
     
     port = int(os.environ.get("PORT", 10001))
     print(f"Khởi động Farm Control Panel tại http://0.0.0.0:{port}", flush=True)
-    
-    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
+    print("=== DISCORD.PY-SELF VERSION ===", flush=True)
+    print("- Tất cả Main Bot đều nhặt card", flush=True)
+    print("- Alpha Bot chia sẻ thông tin tim", flush=True)
+    print("- Hiển thị trạng thái spam farm", flush=True)
+    print("===============================", flush=True)
+    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)# PHIÊN BẢN ĐIỀU KHIỂN FARM - NÂNG CẤP VỚI DISCORD.PY-SELF - OPTIMIZED
