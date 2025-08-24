@@ -170,9 +170,9 @@ def handle_alpha_message(bot, msg):
                     try:
                         time.sleep(5)
                         full_msg_obj = bot.getMessage(channel_id, last_drop_msg_id).json()[0]
-                        if 'reactions' in full_msg_obj and any(r['emoji']['name'] == '🐉' for r in full_msg_obj['reactions']):
+                        if 'reactions' in full_msg_obj and any(r['emoji']['name'] == '🍉' for r in full_msg_obj['reactions']):
                             print(f"[EVENT GRAB | FARM: {target_server['name']}] Phát hiện dưa hấu! Alpha Bot nhặt.", flush=True)
-                            bot.addReaction(channel_id, last_drop_msg_id, "🐉")
+                            bot.addReaction(channel_id, last_drop_msg_id, "🍉")
                     except Exception as e: 
                         print(f"Lỗi kiểm tra event: {e}", flush=True)
                 threading.Thread(target=check_farm_event, daemon=True).start()
