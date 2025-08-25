@@ -1,5 +1,5 @@
-# PHIÊN BẢN ĐIỀU KHIỂN FARM - TỐI ƯU HÓA CHỈ GRAB (discord.py-selfbot)
-import discord
+# PHIÊN BẢN ĐIỀU KHIỂN FARM - TỐI ƯU HÓA CHỈ GRAB
+import discum
 import threading
 import time
 import os
@@ -8,7 +8,6 @@ import re
 import requests
 import json
 import gc
-import asyncio
 from flask import Flask, request, render_template_string, jsonify
 from dotenv import load_dotenv
 
@@ -19,8 +18,8 @@ main_token_alpha = os.getenv("MAIN_TOKEN")
 other_main_tokens = os.getenv("MAIN_TOKENS").split(",") if os.getenv("MAIN_TOKENS") else []
 GREEK_ALPHABET = ['Alpha', 'Beta', 'Gamma', 'Delta', 'Epsilon', 'Zeta', 'Eta', 'Theta', 'Iota', 'Kappa', 'Lambda', 'Mu']
 
-karuta_id = 646937666251915264
-yoru_bot_id = 1311684840462225440
+karuta_id = "646937666251915264"
+yoru_bot_id = "1311684840462225440"
 
 # --- BIẾN TRẠNG THÁI ---
 main_bots = []
@@ -131,23 +130,23 @@ def get_grab_settings(target_server, bot_type, bot_index):
                 target_server.get('heart_threshold_main_other', 50), 
                 {0: 1.0, 1: 2.0, 2: 2.8})
 
-async def handle_alpha_message(bot, message):
+def handle_alpha_message(bot, msg):
     """Chỉ Alpha bot xử lý message và phân phối grab cho các bot khác"""
-    channel_id = str(message.channel.id)
+    channel_id = msg.get("channel_id")
     target_server = next((s for s in farm_servers if s.get('main_channel_id') == channel_id), None)
     if not target_server: return
 
-    if message.author.id == karuta_id and 'dropping' in message.content:
-        last_drop_msg_id = message.id
+    if msg.get("author", {}).get("id") == karuta_id and 'dropping' in msg.get("content", ""):
+        last_drop_msg_id = msg["id"]
         
         # Chỉ Alpha đọc Yoru Bot và phân phối grab
-        async def process_grab_distribution():
-            await asyncio.sleep(0.6)
+        def process_grab_distribution():
+            time.sleep(0.6)
             try:
-                messages = [msg async for msg in message.channel.history(limit=5)]
+                messages = bot.getMessages(channel_id, num=5).json()
                 for msg_item in messages:
-                    if msg_item.author.id == yoru_bot_id and msg_item.embeds:
-                        desc = msg_item.embeds[0].description
+                    if msg_item.get("author", {}).get("id") == yoru_bot_id and msg_item.get("embeds"):
+                        desc = msg_item["embeds"][0].get("description", "")
                         heart_numbers = [int(match.group(1)) if (match := re.search(r'♡(\d+)', line)) else 0 
                                        for line in desc.split('\n')[:3]]
                         if not any(heart_numbers): break
@@ -167,21 +166,20 @@ async def handle_alpha_message(bot, message):
             
             # Event grab chỉ Alpha làm
             if event_grab_enabled:
-                async def check_farm_event():
+                def check_farm_event():
                     try:
-                        await asyncio.sleep(5)
-                        full_msg_obj = await message.channel.fetch_message(last_drop_msg_id)
-                        if full_msg_obj.reactions and any(r.emoji == '🍉' for r in full_msg_obj.reactions):
+                        time.sleep(5)
+                        full_msg_obj = bot.getMessage(channel_id, last_drop_msg_id).json()[0]
+                        if 'reactions' in full_msg_obj and any(r['emoji']['name'] == '🍉' for r in full_msg_obj['reactions']):
                             print(f"[EVENT GRAB | FARM: {target_server['name']}] Phát hiện dưa hấu! Alpha Bot nhặt.", flush=True)
-                            await full_msg_obj.add_reaction("🍉")
+                            bot.addReaction(channel_id, last_drop_msg_id, "🍉")
                     except Exception as e: 
                         print(f"Lỗi kiểm tra event: {e}", flush=True)
-                
-                asyncio.create_task(check_farm_event())
+                threading.Thread(target=check_farm_event, daemon=True).start()
         
-        asyncio.create_task(process_grab_distribution())
+        threading.Thread(target=process_grab_distribution, daemon=True).start()
 
-async def grab_processor_loop():
+def grab_processor_loop():
     """Vòng lặp xử lý grab queue"""
     while True:
         try:
@@ -216,74 +214,51 @@ async def grab_processor_loop():
                             delay = delays.get(max_index, 1.5)
                             actual_delay = delay
                             
-                            # Hàm grab_action giờ nhận thêm dữ liệu cần thiết
-                            async def grab_action(bot_ref, bot_idx, g_data, s_config, h_num):
+                            # THAY ĐỔI 1: Hàm grab_action giờ nhận thêm dữ liệu cần thiết
+                            def grab_action(bot_ref, bot_idx, g_data, s_config, h_num):
                                 try:
-                                    # Sử dụng dữ liệu được truyền vào
-                                    channel = bot_ref.get_channel(int(g_data['channel_id']))
-                                    message = await channel.fetch_message(g_data['message_id'])
-                                    await message.add_reaction(emoji)
-                                    
+                                    # THAY ĐỔI 2: Sử dụng dữ liệu được truyền vào, không dùng biến bên ngoài
+                                    bot_ref.addReaction(g_data['channel_id'], g_data['message_id'], emoji)
                                     ktb_channel_id = s_config.get('ktb_channel_id')
                                     if ktb_channel_id:
-                                        await asyncio.sleep(2)
-                                        ktb_channel = bot_ref.get_channel(int(ktb_channel_id))
-                                        await ktb_channel.send("kt b")
-                                    
+                                        time.sleep(2)
+                                        bot_ref.sendMessage(ktb_channel_id, "kt b")
                                     bot_name = GREEK_ALPHABET[bot_idx] if bot_idx < len(GREEK_ALPHABET) else f'Main {bot_idx}'
                                     print(f"[FARM: {s_config['name']} | Bot {bot_name}] Grab -> {h_num} tim, delay {actual_delay}s", flush=True)
                                 except Exception as e:
                                     print(f"Lỗi grab bot {bot_idx}: {e}", flush=True)
                             
-                            # Truyền dữ liệu vào Task
-                            asyncio.run_coroutine_threadsafe(
-                                grab_action(bot, bot_index, current_grab_data, current_target_server, current_max_num),
-                                bot.loop 
-                            )
+                            # THAY ĐỔI 3: Truyền dữ liệu (g_data, s_config, h_num) vào Timer
+                            threading.Timer(actual_delay, grab_action, args=(bot, bot_index, current_grab_data, current_target_server, current_max_num)).start()
             
-            await asyncio.sleep(0.1)  # Giảm CPU usage
+            time.sleep(0.1)  # Giảm CPU usage
         except Exception as e:
             print(f"[ERROR in grab_processor_loop] {e}", flush=True)
-            await asyncio.sleep(1)
+            time.sleep(1)
 
 def create_bot(token, bot_type, bot_index):
     try:
-        # Tạo event loop riêng cho mỗi bot
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+        bot = discum.Client(token=token, log=False)
         
-        # Khởi tạo bot với intents cần thiết
-        intents = discord.Intents.default()
-        intents.messages = True
-        intents.message_content = True
-        intents.reactions = True
-        
-        # Sử dụng SelfBot từ discord.py-selfbot
-        bot = discord.Client(intents=intents, self_bot=True)
-        
-        @bot.event
-        async def on_ready():
-            print(f"Bot '{bot_type.capitalize()} {bot_index}' đã đăng nhập: {bot.user}", flush=True)
-            # Force garbage collection sau khi connect
-            gc.collect()
+        @bot.gateway.command
+        def on_ready(resp):
+            if resp.event.ready:
+                user = resp.raw.get('user', {})
+                print(f"Bot '{bot_type.capitalize()} {bot_index}' đã đăng nhập: {user.get('username')}", flush=True)
+                # Force garbage collection sau khi connect
+                gc.collect()
 
-        @bot.event
-        async def on_message(message):
+        @bot.gateway.command
+        def on_message(resp):
+            if not (resp.event.message or (resp.raw and resp.raw.get('t') == 'MESSAGE_UPDATE')): 
+                return
+            msg = resp.parsed.auto()
+            
             # Chỉ Alpha bot xử lý message
             if bot_type == 'main' and bot_index == 0:
-                await handle_alpha_message(bot, message)
-        
-        # Lưu event loop để có thể đóng sau này
-        bot.loop = loop
-        
-        # Chạy bot trong thread riêng
-        def run_bot():
-            try:
-                loop.run_until_complete(bot.start(token))
-            except Exception as e:
-                print(f"Lỗi chạy bot {bot_type} {bot_index}: {e}", flush=True)
-        
-        threading.Thread(target=run_bot, daemon=True).start()
+                handle_alpha_message(bot, msg)
+
+        threading.Thread(target=bot.gateway.run, daemon=True).start()
         return bot
     except Exception as e:
         print(f"Lỗi tạo bot {bot_type} {bot_index}: {e}", flush=True)
@@ -297,9 +272,7 @@ def reboot_bot(target_id):
         if bot_type == 'main' and index < len(main_bots):
             try: 
                 if main_bots[index]:
-                    # Đóng bot cũ
-                    asyncio.run_coroutine_threadsafe(main_bots[index].close(), main_bots[index].loop)
-                    main_bots[index].loop.stop()
+                    main_bots[index].gateway.close()
             except: 
                 pass
             finally:
@@ -342,7 +315,7 @@ def periodic_save_loop():
 
 app = Flask(__name__)
 
-# --- GIAO DIỆN WEB TỐI ƯU (Giữ nguyên HTML_TEMPLATE từ code gốc) ---
+# --- GIAO DIỆN WEB TỐI ƯU ---
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="vi">
@@ -565,7 +538,7 @@ document.addEventListener('DOMContentLoaded', function () {
 </html>
 """
 
-# --- FLASK ROUTES (Giữ nguyên từ code gốc) ---
+# --- FLASK ROUTES ---
 @app.route("/")
 def index():
     reboot_action = "DISABLE REBOOT" if auto_reboot_enabled else "ENABLE REBOOT"
@@ -596,7 +569,7 @@ def status():
             })
     return jsonify({'bot_statuses': bot_status_list})
 
-# --- API ENDPOINTS (Giữ nguyên từ code gốc) ---
+# --- API ENDPOINTS ---
 @app.route("/api/main_panel/update", methods=['POST'])
 def api_main_panel_update():
     data = request.json
@@ -738,12 +711,7 @@ if __name__ == "__main__":
     print("Đang khởi tạo các luồng nền...", flush=True)
     
     # Khởi tạo grab processor
-    def start_grab_processor():
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(grab_processor_loop())
-    
-    threading.Thread(target=start_grab_processor, daemon=True).start()
+    threading.Thread(target=grab_processor_loop, daemon=True).start()
     
     # Khởi tạo periodic save
     threading.Thread(target=periodic_save_loop, daemon=True).start()
@@ -762,6 +730,5 @@ if __name__ == "__main__":
     print("✓ Optimized memory usage với garbage collection", flush=True)
     print("✓ Fixed reboot delay persistence", flush=True)
     print("✓ Reduced thread count và CPU usage", flush=True)
-    print("✓ Chuyển đổi sang discord.py-selfbot", flush=True)
     
     app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
