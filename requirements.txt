@@ -1,4 +1,5 @@
-python-dotenv
-discum
+discord.py-selfbot
 flask
+python-dotenv
 requests
+gunicorn
