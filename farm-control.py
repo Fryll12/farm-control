@@ -136,7 +136,7 @@ def handle_alpha_message(bot, msg):
     target_server = next((s for s in farm_servers if s.get('main_channel_id') == channel_id), None)
     if not target_server: return
 
-    if msg.get("author", {}).get("id") == karuta_id and 'dropping 3' in msg.get("content", ""):
+    if msg.get("author", {}).get("id") == karuta_id and 'dropping' in msg.get("content", ""):
         last_drop_msg_id = msg["id"]
         
         # Chỉ Alpha đọc Yoru Bot và phân phối grab
