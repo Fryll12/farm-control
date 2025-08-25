@@ -1,5 +1,4 @@
-discord.py-self
-flask
 python-dotenv
+discum
+flask
 requests
-gunicorn
