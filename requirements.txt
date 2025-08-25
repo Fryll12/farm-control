@@ -1,4 +1,4 @@
-discord.py-selfbot
+discord.py-self
 flask
 python-dotenv
 requests
