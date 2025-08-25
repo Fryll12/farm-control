@@ -9,8 +9,21 @@ import requests
 import json
 import gc
 import asyncio
+import logging
+from datetime import datetime
 from flask import Flask, request, render_template_string, jsonify
 from dotenv import load_dotenv
+
+# Cấu hình logging chi tiết
+logging.basicConfig(
+    level=logging.DEBUG,  # Thay đổi từ INFO sang DEBUG để có thêm log
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("farm_bot.log"),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 
@@ -33,6 +46,7 @@ auto_reboot_thread = None
 bots_lock = threading.RLock()
 server_start_time = time.time()
 bot_active_states = {}
+bot_reconnect_attempts = {}
 
 # Dữ liệu mới
 farm_servers = []
@@ -45,25 +59,32 @@ main_panel_settings = {
 grab_queue = []
 grab_queue_lock = threading.Lock()
 
+# Thêm biến đếm số drop đã xử lý
+processed_drops = 0
+
 # --- HÀM LƯU VÀ TẢI CÀI ĐẶT ---
 def save_farm_settings():
     api_key = os.getenv("JSONBIN_API_KEY")
     farm_bin_id = os.getenv("FARM_JSONBIN_BIN_ID")
-    if not api_key or not farm_bin_id: return
+    if not api_key or not farm_bin_id: 
+        logger.warning("JSONBIN API key hoặc bin ID không được cấu hình")
+        return
     headers = {'Content-Type': 'application/json', 'X-Master-Key': api_key}
     url = f"https://api.jsonbin.io/v3/b/{farm_bin_id}"
     try:
         req = requests.put(url, json=farm_servers, headers=headers, timeout=10)
         if req.status_code == 200: 
-            print("[Farm Settings] Đã lưu cài đặt farm panels.", flush=True)
+            logger.info("Đã lưu cài đặt farm panels")
     except Exception as e: 
-        print(f"[Farm Settings] Lỗi khi lưu farm panels: {e}", flush=True)
+        logger.error(f"Lỗi khi lưu farm panels: {e}")
 
 def load_farm_settings():
     global farm_servers
     api_key = os.getenv("JSONBIN_API_KEY")
     farm_bin_id = os.getenv("FARM_JSONBIN_BIN_ID")
-    if not api_key or not farm_bin_id: return
+    if not api_key or not farm_bin_id: 
+        logger.warning("JSONBIN API key hoặc bin ID không được cấu hình")
+        return
     headers = {'X-Master-Key': api_key, 'X-Bin-Meta': 'false'}
     url = f"https://api.jsonbin.io/v3/b/{farm_bin_id}/latest"
     try:
@@ -71,14 +92,17 @@ def load_farm_settings():
         if req.status_code == 200:
             data = req.json()
             if isinstance(data, list): farm_servers = data
-            print(f"[Farm Settings] Đã tải {len(farm_servers)} cấu hình farm.", flush=True)
-    except Exception: 
+            logger.info(f"Đã tải {len(farm_servers)} cấu hình farm")
+    except Exception as e: 
+        logger.error(f"Lỗi khi tải farm settings: {e}")
         farm_servers = []
         
 def save_main_settings():
     api_key = os.getenv("JSONBIN_API_KEY")
     bin_id = os.getenv("JSONBIN_BIN_ID")
-    if not api_key or not bin_id: return
+    if not api_key or not bin_id: 
+        logger.warning("JSONBIN API key hoặc bin ID không được cấu hình")
+        return
     settings = {
         'event_grab_enabled': event_grab_enabled, 
         'auto_reboot_enabled': auto_reboot_enabled, 
@@ -92,15 +116,17 @@ def save_main_settings():
     try:
         req = requests.put(url, json=settings, headers=headers, timeout=10)
         if req.status_code == 200: 
-            print("[Settings] Đã lưu cài đặt chính.", flush=True)
+            logger.info("Đã lưu cài đặt chính")
     except Exception as e: 
-        print(f"[Settings] Lỗi khi lưu cài đặt chính: {e}", flush=True)
+        logger.error(f"Lỗi khi lưu cài đặt chính: {e}")
 
 def load_main_settings():
     global event_grab_enabled, auto_reboot_enabled, auto_reboot_delay, bot_active_states, last_reboot_cycle_time, main_panel_settings
     api_key = os.getenv("JSONBIN_API_KEY")
     bin_id = os.getenv("JSONBIN_BIN_ID")
-    if not api_key or not bin_id: return
+    if not api_key or not bin_id: 
+        logger.warning("JSONBIN API key hoặc bin ID không được cấu hình")
+        return
     headers = {'X-Master-Key': api_key}
     url = f"https://api.jsonbin.io/v3/b/{bin_id}/latest"
     try:
@@ -114,11 +140,11 @@ def load_main_settings():
                 bot_active_states = settings.get('bot_active_states', {})
                 last_reboot_cycle_time = settings.get('last_reboot_cycle_time', 0)
                 main_panel_settings = settings.get('main_panel_settings', main_panel_settings)
-                print("[Settings] Đã tải cài đặt chính.", flush=True)
+                logger.info("Đã tải cài đặt chính")
             else: 
                 save_main_settings()
     except Exception as e: 
-        print(f"[Settings] Lỗi khi tải cài đặt chính: {e}", flush=True)
+        logger.error(f"Lỗi khi tải cài đặt chính: {e}")
 
 # --- LOGIC BOT FARM TỐI ƯU ---
 def get_grab_settings(target_server, bot_type, bot_index):
@@ -133,24 +159,49 @@ def get_grab_settings(target_server, bot_type, bot_index):
 
 async def handle_alpha_message(bot, message):
     """Chỉ Alpha bot xử lý message và phân phối grab cho các bot khác"""
+    global processed_drops
+    
+    # Log tất cả message từ Karuta bot
+    if message.author.id == karuta_id:
+        logger.debug(f"Nhận message từ Karuta bot: {message.content[:100]}...")
+    
     channel_id = str(message.channel.id)
     target_server = next((s for s in farm_servers if s.get('main_channel_id') == channel_id), None)
-    if not target_server: return
+    
+    # Log nếu không tìm thấy server
+    if not target_server:
+        logger.debug(f"Không tìm thấy server cho channel ID: {channel_id}")
+        return
+    
+    logger.debug(f"Tìm thấy server: {target_server['name']} cho channel ID: {channel_id}")
 
     if message.author.id == karuta_id and 'dropping' in message.content:
+        processed_drops += 1
+        logger.info(f"[DROP #{processed_drops}] Phát hiện drop từ Karuta bot trong server {target_server['name']}")
         last_drop_msg_id = message.id
         
         # Chỉ Alpha đọc Yoru Bot và phân phối grab
         async def process_grab_distribution():
+            logger.debug(f"Bắt đầu xử lý drop ID: {last_drop_msg_id}")
             await asyncio.sleep(0.6)
             try:
                 messages = [msg async for msg in message.channel.history(limit=5)]
+                logger.debug(f"Đọc được {len(messages)} messages gần nhất")
+                
                 for msg_item in messages:
+                    logger.debug(f"Kiểm tra message từ {msg_item.author.id} (Yoru: {yoru_bot_id})")
                     if msg_item.author.id == yoru_bot_id and msg_item.embeds:
+                        logger.debug("Tìm thấy message từ Yoru bot với embeds")
                         desc = msg_item.embeds[0].description
+                        logger.debug(f"Nội dung embed: {desc[:100]}...")
+                        
                         heart_numbers = [int(match.group(1)) if (match := re.search(r'♡(\d+)', line)) else 0 
                                        for line in desc.split('\n')[:3]]
-                        if not any(heart_numbers): break
+                        logger.info(f"Tim values: {heart_numbers}")
+                        
+                        if not any(heart_numbers): 
+                            logger.debug("Không tìm thấy giá trị tim nào")
+                            break
                         
                         # Phân phối grab cho các bot
                         with grab_queue_lock:
@@ -161,21 +212,27 @@ async def handle_alpha_message(bot, message):
                                 'target_server': target_server,
                                 'timestamp': time.time()
                             })
+                            logger.info(f"Đã thêm drop vào queue, queue length: {len(grab_queue)}")
                         break
+                else:
+                    logger.debug("Không tìm thấy message từ Yoru bot trong 5 messages gần nhất")
             except Exception as e: 
-                print(f"Lỗi đọc Yoru Bot: {e}", flush=True)
+                logger.error(f"Lỗi đọc Yoru Bot: {e}")
             
             # Event grab chỉ Alpha làm
             if event_grab_enabled:
+                logger.debug("Event grab được bật, kiểm tra event...")
                 async def check_farm_event():
                     try:
                         await asyncio.sleep(5)
                         full_msg_obj = await message.channel.fetch_message(last_drop_msg_id)
                         if full_msg_obj.reactions and any(r.emoji == '🍉' for r in full_msg_obj.reactions):
-                            print(f"[EVENT GRAB | FARM: {target_server['name']}] Phát hiện dưa hấu! Alpha Bot nhặt.", flush=True)
+                            logger.info(f"[EVENT GRAB | FARM: {target_server['name']}] Phát hiện dưa hấu! Alpha Bot nhặt.")
                             await full_msg_obj.add_reaction("🍉")
+                        else:
+                            logger.debug("Không tìm thấy reaction dưa hấu")
                     except Exception as e: 
-                        print(f"Lỗi kiểm tra event: {e}", flush=True)
+                        logger.error(f"Lỗi kiểm tra event: {e}")
                 
                 asyncio.create_task(check_farm_event())
         
@@ -183,15 +240,20 @@ async def handle_alpha_message(bot, message):
 
 async def grab_processor_loop():
     """Vòng lặp xử lý grab queue"""
+    logger.info("Bắt đầu grab processor loop")
     while True:
         try:
             current_time = time.time()
             with grab_queue_lock:
                 # Xóa grab cũ (>30s)
+                old_count = len(grab_queue)
                 grab_queue[:] = [g for g in grab_queue if current_time - g['timestamp'] < 30]
+                if old_count != len(grab_queue):
+                    logger.debug(f"Đã xóa {old_count - len(grab_queue)} grab cũ")
                 
                 if grab_queue:
                     grab_data = grab_queue.pop(0)
+                    logger.debug(f"Lấy grab từ queue, còn lại: {len(grab_queue)}")
                 else:
                     grab_data = None
             
@@ -202,13 +264,17 @@ async def grab_processor_loop():
                 current_target_server = grab_data['target_server']
                 current_grab_data = grab_data
                 
+                logger.info(f"Xử lý grab với tim values: {current_heart_numbers}, max: {current_max_num}")
+                
                 # Xử lý grab cho từng bot
                 with bots_lock:
                     for bot_index, bot in enumerate(main_bots):
                         if not bot_active_states.get(f'main_{bot_index}', False):
+                            logger.debug(f"Bot {bot_index} không active, bỏ qua")
                             continue
                             
                         is_enabled, threshold, delays = get_grab_settings(current_target_server, 'main', bot_index)
+                        logger.debug(f"Bot {bot_index}: enabled={is_enabled}, threshold={threshold}")
                         
                         if is_enabled and current_max_num >= threshold:
                             max_index = current_heart_numbers.index(current_max_num)
@@ -216,13 +282,16 @@ async def grab_processor_loop():
                             delay = delays.get(max_index, 1.5)
                             actual_delay = delay
                             
+                            bot_name = GREEK_ALPHABET[bot_index] if bot_index < len(GREEK_ALPHABET) else f'Main {bot_index}'
+                            logger.info(f"Bot {bot_name} sẽ grab {emoji} với delay {actual_delay}s")
+                            
                             # Hàm grab_action giờ nhận thêm dữ liệu cần thiết
-                            async def grab_action(bot_ref, bot_idx, g_data, s_config, h_num):
+                            async def grab_action(bot_ref, bot_idx, g_data, s_config, h_num, e):
                                 try:
                                     # Sử dụng dữ liệu được truyền vào
                                     channel = bot_ref.get_channel(int(g_data['channel_id']))
                                     message = await channel.fetch_message(g_data['message_id'])
-                                    await message.add_reaction(emoji)
+                                    await message.add_reaction(e)
                                     
                                     ktb_channel_id = s_config.get('ktb_channel_id')
                                     if ktb_channel_id:
@@ -231,20 +300,23 @@ async def grab_processor_loop():
                                         await ktb_channel.send("kt b")
                                     
                                     bot_name = GREEK_ALPHABET[bot_idx] if bot_idx < len(GREEK_ALPHABET) else f'Main {bot_idx}'
-                                    print(f"[FARM: {s_config['name']} | Bot {bot_name}] Grab -> {h_num} tim, delay {actual_delay}s", flush=True)
+                                    logger.info(f"[FARM: {s_config['name']} | Bot {bot_name}] Grab -> {h_num} tim, delay {actual_delay}s")
                                 except Exception as e:
-                                    print(f"Lỗi grab bot {bot_idx}: {e}", flush=True)
+                                    logger.error(f"Lỗi grab bot {bot_idx}: {e}")
                             
                             # Truyền dữ liệu vào Task
-                            asyncio.create_task(grab_action(bot, bot_index, current_grab_data, current_target_server, current_max_num))
+                            asyncio.create_task(grab_action(bot, bot_index, current_grab_data, current_target_server, current_max_num, emoji))
+                        else:
+                            logger.debug(f"Bot {bot_index} không đủ điều kiện grab (enabled={is_enabled}, max={current_max_num}, threshold={threshold})")
             
             await asyncio.sleep(0.1)  # Giảm CPU usage
         except Exception as e:
-            print(f"[ERROR in grab_processor_loop] {e}", flush=True)
+            logger.error(f"[ERROR in grab_processor_loop] {e}")
             await asyncio.sleep(1)
 
 def create_bot(token, bot_type, bot_index):
     try:
+        logger.info(f"Tạo bot {bot_type} {bot_index}")
         # Tạo event loop riêng cho mỗi bot
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
@@ -260,15 +332,43 @@ def create_bot(token, bot_type, bot_index):
         
         @bot.event
         async def on_ready():
-            print(f"Bot '{bot_type.capitalize()} {bot_index}' đã đăng nhập: {bot.user}", flush=True)
+            logger.info(f"Bot '{bot_type.capitalize()} {bot_index}' đã đăng nhập: {bot.user}")
+            # Reset số lần thử kết nối lại khi đăng nhập thành công
+            bot_reconnect_attempts[f'{bot_type}_{bot_index}'] = 0
             # Force garbage collection sau khi connect
             gc.collect()
 
         @bot.event
         async def on_message(message):
+            # Log tất cả message để debug
+            if message.author.id == karuta_id:
+                logger.debug(f"Alpha bot nhận message từ Karuta: {message.content[:50]}...")
+            
             # Chỉ Alpha bot xử lý message
             if bot_type == 'main' and bot_index == 0:
                 await handle_alpha_message(bot, message)
+        
+        @bot.event
+        async def on_disconnect():
+            logger.warning(f"Bot {bot_type} {bot_index} đã mất kết nối")
+            # Tăng số lần thử kết nối lại
+            bot_key = f'{bot_type}_{bot_index}'
+            bot_reconnect_attempts[bot_key] = bot_reconnect_attempts.get(bot_key, 0) + 1
+            
+            # Nếu thử quá 5 lần, tạm dừng bot
+            if bot_reconnect_attempts[bot_key] > 5:
+                logger.error(f"Bot {bot_type} {bot_index} đã thử kết nối lại quá 5 lần. Tạm dừng bot.")
+                bot_active_states[f'{bot_type}_{bot_index}'] = False
+                save_main_settings()
+                return
+                
+            # Thử kết nối lại sau 30 giây
+            await asyncio.sleep(30)
+            try:
+                logger.info(f"Thử kết nối lại bot {bot_type} {bot_index}...")
+                await bot.start(token)
+            except Exception as e:
+                logger.error(f"Không thể kết nối lại bot {bot_type} {bot_index}: {e}")
         
         # Lưu event loop để có thể đóng sau này
         bot.loop = loop
@@ -278,12 +378,18 @@ def create_bot(token, bot_type, bot_index):
             try:
                 loop.run_until_complete(bot.start(token))
             except Exception as e:
-                print(f"Lỗi chạy bot {bot_type} {bot_index}: {e}", flush=True)
+                logger.error(f"Lỗi chạy bot {bot_type} {bot_index}: {e}")
+                # Thử kết nối lại sau 30 giây
+                time.sleep(30)
+                try:
+                    loop.run_until_complete(bot.start(token))
+                except Exception as e2:
+                    logger.error(f"Lỗi kết nối lại bot {bot_type} {bot_index}: {e2}")
         
         threading.Thread(target=run_bot, daemon=True).start()
         return bot
     except Exception as e:
-        print(f"Lỗi tạo bot {bot_type} {bot_index}: {e}", flush=True)
+        logger.error(f"Lỗi tạo bot {bot_type} {bot_index}: {e}")
         return None
 
 # --- REBOOT FUNCTIONS ---
@@ -295,14 +401,17 @@ def reboot_bot(target_id):
             try: 
                 if main_bots[index]:
                     # Đóng bot cũ
-                    asyncio.run_coroutine_threadsafe(main_bots[index].close(), main_bots[index].loop)
-                    main_bots[index].loop.stop()
+                    try:
+                        asyncio.run_coroutine_threadsafe(main_bots[index].close(), main_bots[index].loop)
+                        main_bots[index].loop.stop()
+                    except Exception as e:
+                        logger.error(f"Lỗi khi đóng bot {target_id}: {e}")
             except: 
                 pass
             finally:
                 token = main_token_alpha if index == 0 else other_main_tokens[index - 1]
                 main_bots[index] = create_bot(token, 'main', index)
-                print(f"[Reboot] Main Bot {index} đã khởi động lại.", flush=True)
+                logger.info(f"Main Bot {index} đã khởi động lại")
                 # Force cleanup
                 gc.collect()
 
@@ -311,7 +420,7 @@ def auto_reboot_loop():
     while not auto_reboot_stop_event.is_set():
         try:
             if auto_reboot_enabled and (time.time() - last_reboot_cycle_time) >= auto_reboot_delay:
-                print("[Reboot] Bắt đầu chu kỳ reboot tự động...", flush=True)
+                logger.info("Bắt đầu chu kỳ reboot tự động...")
                 # Bỏ lock ở đây để tránh giữ khóa quá lâu
                 for i in range(len(main_bots)):
                     # Kiểm tra trạng thái active trước khi reboot
@@ -324,14 +433,14 @@ def auto_reboot_loop():
             if auto_reboot_stop_event.wait(timeout=60): 
                 break
         except Exception as e: 
-            print(f"[ERROR in auto_reboot_loop] {e}", flush=True)
+            logger.error(f"[ERROR in auto_reboot_loop] {e}")
             time.sleep(60)
-    print("[Reboot] Luồng tự động reboot đã dừng.", flush=True)
+    logger.info("Luồng tự động reboot đã dừng")
 
 def periodic_save_loop():
     while True:
         time.sleep(300)
-        print("[Settings] Bắt đầu lưu định kỳ...", flush=True)
+        logger.info("Bắt đầu lưu định kỳ...")
         save_farm_settings()
         save_main_settings()
         # Cleanup memory
@@ -717,7 +826,7 @@ if __name__ == "__main__":
     load_farm_settings()
     load_main_settings()
     
-    print("Đang khởi tạo các bot...", flush=True)
+    logger.info("Đang khởi tạo các bot...")
     with bots_lock:
         # Khởi tạo Main bots
         if main_token_alpha:
@@ -732,7 +841,7 @@ if __name__ == "__main__":
                 if f'main_{bot_index}' not in bot_active_states: 
                     bot_active_states[f'main_{bot_index}'] = True
 
-    print("Đang khởi tạo các luồng nền...", flush=True)
+    logger.info("Đang khởi tạo các luồng nền...")
     
     # Khởi tạo grab processor
     def start_grab_processor():
@@ -752,13 +861,15 @@ if __name__ == "__main__":
         auto_reboot_thread.start()
     
     port = int(os.environ.get("PORT", 10001))
-    print(f"Khởi động Farm Control Panel tại http://0.0.0.0:{port}", flush=True)
-    print("=== OPTIMIZATIONS APPLIED ===", flush=True)
-    print("✓ Chỉ Alpha bot đọc message và phân phối grab", flush=True)
-    print("✓ Removed spam features và sub bots", flush=True) 
-    print("✓ Optimized memory usage với garbage collection", flush=True)
-    print("✓ Fixed reboot delay persistence", flush=True)
-    print("✓ Reduced thread count và CPU usage", flush=True)
-    print("✓ Chuyển đổi sang discord.py-selfbot", flush=True)
+    logger.info(f"Khởi động Farm Control Panel tại http://0.0.0.0:{port}")
+    logger.info("=== OPTIMIZATIONS APPLIED ===")
+    logger.info("✓ Chỉ Alpha bot đọc message và phân phối grab")
+    logger.info("✓ Removed spam features và sub bots") 
+    logger.info("✓ Optimized memory usage với garbage collection")
+    logger.info("✓ Fixed reboot delay persistence")
+    logger.info("✓ Reduced thread count và CPU usage")
+    logger.info("✓ Chuyển đổi sang discord.py-selfbot")
+    logger.info("✓ Thêm cơ chế xử lý lỗi và kết nối lại")
+    logger.info("✓ Thêm logging chi tiết để debug")
     
     app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
