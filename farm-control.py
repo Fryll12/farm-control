@@ -222,7 +222,7 @@ def grab_processor_loop():
                                     ktb_channel_id = s_config.get('ktb_channel_id')
                                     if ktb_channel_id:
                                         time.sleep(2)
-                                        bot_ref.sendMessage(ktb_channel_id, "kt b")
+                                        bot_ref.sendMessage(ktb_channel_id, "kt fs")
                                     bot_name = GREEK_ALPHABET[bot_idx] if bot_idx < len(GREEK_ALPHABET) else f'Main {bot_idx}'
                                     print(f"[FARM: {s_config['name']} | Bot {bot_name}] Grab -> {h_num} tim, delay {actual_delay}s", flush=True)
                                 except Exception as e:
