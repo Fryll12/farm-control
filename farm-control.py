@@ -125,7 +125,7 @@ def get_grab_settings(target_server, bot_type, bot_index):
     if bot_type == 'main' and bot_index == 0:  # Alpha Bot
         return (target_server.get('auto_grab_enabled_alpha', False), 
                 target_server.get('heart_threshold_alpha', 15), 
-                {0: 0.3, 1: 1.3, 2: 2.1})
+                {0: 0.3, 1: 1.4, 2: 2.1})
     else:  # Other Main Bots
         return (target_server.get('auto_grab_enabled_main_other', False), 
                 target_server.get('heart_threshold_main_other', 50), 
