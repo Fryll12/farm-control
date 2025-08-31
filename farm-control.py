@@ -169,7 +169,7 @@ def handle_alpha_message(bot, msg):
                                 if grab_reason:
                                     try:
                                         emoji = ["1️⃣", "2️⃣", "3️⃣"][grab_index]
-                                        bot.addReaction(channel_id, last_drop_msg_id, emoji) # Grab tuần tự
+                                        bot.addReaction(channel_id, last_drop_msg_id, emoji)
                                         
                                         reason_text = f"{grab_value} tim" if grab_reason == 'heart' else f"#{grab_value}"
                                         print(f"[FARM: {target_server['name']} | Bot Alpha] Grab -> {reason_text} (Grab trước)", flush=True)
@@ -198,9 +198,18 @@ def handle_alpha_message(bot, msg):
             except Exception as e: 
                 print(f"Lỗi đọc Yoru Bot: {e}", flush=True)
             
-            # Event grab không thay đổi
+            # SỬA LỖI: Bổ sung lại phần code xử lý event grab bị thiếu
             if event_grab_enabled:
-                # ... (code event grab giữ nguyên)
+                def check_farm_event():
+                    try:
+                        time.sleep(5)
+                        full_msg_obj = bot.getMessage(channel_id, last_drop_msg_id).json()[0]
+                        if 'reactions' in full_msg_obj and any(r['emoji']['name'] == '🍉' for r in full_msg_obj['reactions']):
+                            print(f"[EVENT GRAB | FARM: {target_server['name']}] Phát hiện dưa hấu! Alpha Bot nhặt.", flush=True)
+                            bot.addReaction(channel_id, last_drop_msg_id, "🍉")
+                    except Exception as e: 
+                        print(f"Lỗi kiểm tra event: {e}", flush=True)
+                threading.Timer(target=check_farm_event, daemon=True).start()
         
         threading.Thread(target=process_grab_sequentially, daemon=True).start()
         
