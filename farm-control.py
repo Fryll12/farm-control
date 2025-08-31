@@ -140,7 +140,6 @@ def handle_alpha_message(bot, msg):
     if msg.get("author", {}).get("id") == karuta_id and 'dropping' in msg.get("content", ""):
         last_drop_msg_id = msg["id"]
         
-        # Chỉ Alpha đọc Yoru Bot và phân phối grab
         def process_grab_distribution():
             time.sleep(0.6)
             try:
@@ -152,12 +151,13 @@ def handle_alpha_message(bot, msg):
                                        for line in desc.split('\n')[:3]]
                         if not any(heart_numbers): break
                         
-                        # Phân phối grab cho các bot
+                        # THAY ĐỔI: Thêm 'description' vào hàng đợi để xử lý print
                         with grab_queue_lock:
                             grab_queue.append({
                                 'channel_id': channel_id,
                                 'message_id': last_drop_msg_id,
                                 'heart_numbers': heart_numbers,
+                                'description': desc, # <-- Dòng mới được thêm vào
                                 'target_server': target_server,
                                 'timestamp': time.time()
                             })
@@ -165,7 +165,6 @@ def handle_alpha_message(bot, msg):
             except Exception as e: 
                 print(f"Lỗi đọc Yoru Bot: {e}", flush=True)
             
-            # Event grab chỉ Alpha làm
             if event_grab_enabled:
                 def check_farm_event():
                     try:
@@ -181,7 +180,7 @@ def handle_alpha_message(bot, msg):
         threading.Thread(target=process_grab_distribution, daemon=True).start()
 
 def grab_processor_loop():
-    """Vòng lặp xử lý grab queue"""
+    """Vòng lặp xử lý grab queue với logic 2 điều kiện (tim > print)"""
     while True:
         try:
             current_time = time.time()
@@ -191,43 +190,67 @@ def grab_processor_loop():
             
             if grab_data:
                 current_heart_numbers = grab_data['heart_numbers']
-                current_max_num = max(current_heart_numbers)
-                current_target_server = grab_data['target_server']
-                current_grab_data = grab_data
+                current_description = grab_data['description'] # Lấy description đã lưu
                 
                 with bots_lock:
                     for bot_index, bot in enumerate(main_bots):
                         if not bot_active_states.get(f'main_{bot_index}', False):
                             continue
                             
-                        is_enabled, threshold, delays = get_grab_settings(current_target_server, 'main', bot_index)
-                        
-                        if is_enabled and current_max_num >= threshold:
-                            max_index = current_heart_numbers.index(current_max_num)
-                            emoji = ["1️⃣", "2️⃣", "3️⃣"][max_index]
-                            delay = delays.get(max_index, 1.5)
+                        is_enabled, threshold, delays = get_grab_settings(grab_data['target_server'], 'main', bot_index)
+                        if not is_enabled:
+                            continue
+
+                        grab_reason = None
+                        grab_index = -1
+                        grab_value = -1
+
+                        # --- LOGIC MỚI ---
+                        # 1. Ưu tiên kiểm tra điều kiện tim
+                        max_hearts = max(current_heart_numbers)
+                        if max_hearts >= threshold:
+                            grab_reason = 'heart'
+                            grab_index = current_heart_numbers.index(max_hearts)
+                            grab_value = max_hearts
+                        # 2. Nếu không đủ tim, kiểm tra điều kiện print < 1000
+                        else:
+                            card_lines = current_description.split('\n')[:3]
+                            # Lấy số print, nếu không có thì mặc định là số rất lớn
+                            print_numbers = [int(match.group(1)) if (match := re.search(r'#(\d+)', line)) else 999999 for line in card_lines]
+                            min_print = min(print_numbers)
                             
-                            def grab_action(bot_ref, bot_idx, g_data, s_config, h_num):
+                            if min_print < 1000:
+                                grab_reason = 'print'
+                                grab_index = print_numbers.index(min_print)
+                                grab_value = min_print
+                        
+                        # 3. Nếu có lý do để grab (tim hoặc print), thực hiện grab
+                        if grab_reason:
+                            emoji = ["1️⃣", "2️⃣", "3️⃣"][grab_index]
+                            delay = delays.get(grab_index, 1.5)
+                            
+                            def grab_action(bot_ref, bot_idx, g_data, s_config, reason, value):
                                 try:
                                     bot_ref.addReaction(g_data['channel_id'], g_data['message_id'], emoji)
                                     ktb_channel_id = s_config.get('ktb_channel_id')
                                     if ktb_channel_id:
                                         time.sleep(2)
                                         bot_ref.sendMessage(ktb_channel_id, "kt fs")
-                                    bot_name = GREEK_ALPHABET[bot_idx] if bot_idx < len(GREEK_ALPHABET) else f'Main {bot_idx}'
-                                    print(f"[FARM: {s_config['name']} | Bot {bot_name}] Grab -> {h_num} tim, delay {delay}s", flush=True)
 
-                                    # --- LOGIC MỚI: NẾU LÀ BOT ALPHA, GỬI LỆNH KV ---
-                                    # bot_idx == 0 tương ứng với bot Alpha
+                                    bot_name = GREEK_ALPHABET[bot_idx] if bot_idx < len(GREEK_ALPHABET) else f'Main {bot_idx}'
+                                    # Hiển thị lý do grab trong log
+                                    reason_text = f"{value} tim" if reason == 'heart' else f"#{value}"
+                                    print(f"[FARM: {s_config['name']} | Bot {bot_name}] Grab -> {reason_text}, delay {delay}s", flush=True)
+                                    
+                                    # Logic gửi kv cho Alpha vẫn như cũ
                                     if bot_idx == 0 and 'kv_channel_id' in globals() and kv_channel_id:
                                         print(f"    -> [KV SENDER] Alpha Bot đã grab, gửi lệnh 'kv'...", flush=True)
-                                        # Gửi lệnh sau một khoảng trễ nhỏ để tránh xung đột
                                         threading.Timer(2.0, bot_ref.sendMessage, args=(kv_channel_id, "kv")).start()
 
                                 except Exception as e:
                                     print(f"Lỗi grab bot {bot_idx}: {e}", flush=True)
                             
-                            threading.Timer(delay, grab_action, args=(bot, bot_index, current_grab_data, current_target_server, current_max_num)).start()
+                            threading.Timer(delay, grab_action, args=(bot, bot_index, grab_data, grab_data['target_server'], grab_reason, grab_value)).start()
             
             time.sleep(0.1)
         except Exception as e:
