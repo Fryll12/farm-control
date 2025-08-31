@@ -223,8 +223,9 @@ def grab_processor_loop():
                                     print(f"[FARM: {grab_data['target_server']['name']} | Bot Alpha] Grab -> {reason_text} (Grab trước)", flush=True)
 
                                     if 'kv_channel_id' in globals() and kv_channel_id:
-                                        print(f"    -> [KV SENDER] Alpha Bot đã grab, gửi lệnh 'kv'...", flush=True)
-                                        alpha_bot.sendMessage(kv_channel_id, "kv")
+                                        print(f"    -> [KV SENDER] Alpha Bot đã grab, gửi lệnh 'kv' sau 2 giây...", flush=True)
+                                        # Dùng Timer để tạo độ trễ 2.0 giây trước khi gửi
+                                        threading.Timer(2.0, alpha_bot.sendMessage, args=(kv_channel_id, "kv")).start()
                                     
                                     ktb_channel_id = grab_data['target_server'].get('ktb_channel_id')
                                     if ktb_channel_id:
