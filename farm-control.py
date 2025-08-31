@@ -20,7 +20,7 @@ GREEK_ALPHABET = ['Alpha', 'Beta', 'Gamma', 'Delta', 'Epsilon', 'Zeta', 'Eta', '
 
 karuta_id = "646937666251915264"
 yoru_bot_id = "1311684840462225440"
-
+kv_channel_id = os.getenv("KV_CHANNEL_ID")
 # --- BIẾN TRẠNG THÁI ---
 main_bots = []
 event_grab_enabled = False
@@ -131,15 +131,15 @@ def get_grab_settings(target_server, bot_type, bot_index):
                 {0: 1.0, 1: 2.0, 2: 2.8})
 
 def handle_alpha_message(bot, msg):
-    """Chỉ Alpha bot xử lý message và phân phối grab cho các bot khác"""
+    """Chỉ Alpha bot xử lý message, phân phối grab, và điều phối lệnh kv"""
     channel_id = msg.get("channel_id")
-    target_server = next((s for s in farm_servers if s.get('main_channel_id') == channel_id), None)
-    if not target_server: return
+    author_id = msg.get("author", {}).get("id")
 
-    if msg.get("author", {}).get("id") == karuta_id and 'dropping' in msg.get("content", ""):
+    # --- PHẦN 1: XỬ LÝ DROP VÀ PHÂN PHỐI GRAB (logic cũ) ---
+    target_server = next((s for s in farm_servers if s.get('main_channel_id') == channel_id), None)
+    if target_server and author_id == karuta_id and 'dropping' in msg.get("content", ""):
         last_drop_msg_id = msg["id"]
         
-        # Chỉ Alpha đọc Yoru Bot và phân phối grab
         def process_grab_distribution():
             time.sleep(0.6)
             try:
@@ -151,7 +151,6 @@ def handle_alpha_message(bot, msg):
                                        for line in desc.split('\n')[:3]]
                         if not any(heart_numbers): break
                         
-                        # Phân phối grab cho các bot
                         with grab_queue_lock:
                             grab_queue.append({
                                 'channel_id': channel_id,
@@ -164,7 +163,6 @@ def handle_alpha_message(bot, msg):
             except Exception as e: 
                 print(f"Lỗi đọc Yoru Bot: {e}", flush=True)
             
-            # Event grab chỉ Alpha làm
             if event_grab_enabled:
                 def check_farm_event():
                     try:
@@ -178,6 +176,30 @@ def handle_alpha_message(bot, msg):
                 threading.Thread(target=check_farm_event, daemon=True).start()
         
         threading.Thread(target=process_grab_distribution, daemon=True).start()
+
+    # --- PHẦN 2: LOGIC MỚI - ALPHA ĐIỀU PHỐI GỬI 'KV' ---
+    if kv_channel_id and author_id == karuta_id:
+        content = msg.get("content", "")
+        # Kiểm tra xem có phải tin nhắn báo grab thành công không
+        if "took the" in content:
+            # Dùng regex để tìm ID người dùng trong tag <@USER_ID>
+            match = re.search(r'<@(\d+)>', content)
+            if match:
+                grabber_id = match.group(1) # Lấy ID của tài khoản đã grab thành công
+                
+                # Tìm xem bot nào trong danh sách có ID này
+                with bots_lock:
+                    for bot_index, bot_instance in enumerate(main_bots):
+                        # Kiểm tra bot có tồn tại và đã kết nối thành công chưa
+                        if bot_instance and bot_instance.gateway.session and bot_instance.gateway.session.user:
+                            bot_user_id = bot_instance.gateway.session.user.get('id')
+                            if bot_user_id == grabber_id:
+                                bot_name = GREEK_ALPHABET[bot_index] if bot_index < len(GREEK_ALPHABET) else f'Main {bot_index}'
+                                print(f"✅ [KV Dispatcher] Alpha phát hiện '{bot_name}' grab thành công. Ra lệnh gửi 'kv'.", flush=True)
+                                
+                                # Ra lệnh cho đúng bot đó gửi lệnh 'kv'
+                                threading.Timer(1.0, bot_instance.sendMessage, args=(kv_channel_id, "kv")).start()
+                                break # Dừng tìm kiếm vì đã tìm thấy bot
 
 def grab_processor_loop():
     """Vòng lặp xử lý grab queue"""
