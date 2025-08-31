@@ -151,7 +151,7 @@ def handle_alpha_message(bot, msg):
                                        for line in desc.split('\n')[:3]]
                         if not any(heart_numbers): break
 
-                        # --- LOGIC MỚI: ALPHA TỰ GRAB TRƯỚC ---
+                        # --- LOGIC GRAB CỦA ALPHA ---
                         if bot_active_states.get('main_0', False):
                             is_enabled, threshold, delays = get_grab_settings(target_server, 'main', 0)
                             if is_enabled:
@@ -168,12 +168,17 @@ def handle_alpha_message(bot, msg):
                                 
                                 if grab_reason:
                                     try:
+                                        # SỬA LỖI: Bổ sung logic tính toán và chờ delay cho Alpha
+                                        delay = delays.get(grab_index, 0.3)
+                                        reason_text = f"{grab_value} tim" if grab_reason == 'heart' else f"#{grab_value}"
+                                        print(f"[FARM: {target_server['name']} | Bot Alpha] Grab -> {reason_text} (Chờ {delay:.1f}s)", flush=True)
+                                        
+                                        time.sleep(delay) # <-- Thực hiện chờ delay
+                                        
                                         emoji = ["1️⃣", "2️⃣", "3️⃣"][grab_index]
                                         bot.addReaction(channel_id, last_drop_msg_id, emoji)
                                         
-                                        reason_text = f"{grab_value} tim" if grab_reason == 'heart' else f"#{grab_value}"
-                                        print(f"[FARM: {target_server['name']} | Bot Alpha] Grab -> {reason_text} (Grab trước)", flush=True)
-                                        
+                                        # Các hành động sau grab không thay đổi
                                         if kv_channel_id:
                                             print(f"    -> [KV SENDER] Alpha Bot đã grab, gửi lệnh 'kv' sau 2 giây...", flush=True)
                                             threading.Timer(2.0, bot.sendMessage, args=(kv_channel_id, "kv")).start()
@@ -184,7 +189,7 @@ def handle_alpha_message(bot, msg):
                                     except Exception as e:
                                         print(f"Lỗi grab bot Alpha: {e}", flush=True)
 
-                        # --- Sau khi Alpha xử lý xong, mới đẩy thông tin cho Beta+ ---
+                        # Sau khi Alpha xử lý xong, mới đẩy thông tin cho Beta+
                         with grab_queue_lock:
                             grab_queue.append({
                                 'channel_id': channel_id,
@@ -198,7 +203,6 @@ def handle_alpha_message(bot, msg):
             except Exception as e: 
                 print(f"Lỗi đọc Yoru Bot: {e}", flush=True)
             
-            # SỬA LỖI: Bổ sung lại phần code xử lý event grab bị thiếu
             if event_grab_enabled:
                 def check_farm_event():
                     try:
@@ -209,7 +213,7 @@ def handle_alpha_message(bot, msg):
                             bot.addReaction(channel_id, last_drop_msg_id, "🍉")
                     except Exception as e: 
                         print(f"Lỗi kiểm tra event: {e}", flush=True)
-                threading.Timer(target=check_farm_event, daemon=True).start()
+                threading.Thread(target=check_farm_event, daemon=True).start()
         
         threading.Thread(target=process_grab_sequentially, daemon=True).start()
         
