@@ -17,10 +17,11 @@ load_dotenv()
 main_token_alpha = os.getenv("MAIN_TOKEN")
 other_main_tokens = os.getenv("MAIN_TOKENS").split(",") if os.getenv("MAIN_TOKENS") else []
 GREEK_ALPHABET = ['Alpha', 'Beta', 'Gamma', 'Delta', 'Epsilon', 'Zeta', 'Eta', 'Theta', 'Iota', 'Kappa', 'Lambda', 'Mu']
+kv_channel_id = os.getenv("KV_CHANNEL_ID")
 
 karuta_id = "646937666251915264"
 yoru_bot_id = "1311684840462225440"
-kv_channel_id = os.getenv("KV_CHANNEL_ID")
+
 # --- BIẾN TRẠNG THÁI ---
 main_bots = []
 event_grab_enabled = False
@@ -131,15 +132,15 @@ def get_grab_settings(target_server, bot_type, bot_index):
                 {0: 1.0, 1: 2.0, 2: 2.8})
 
 def handle_alpha_message(bot, msg):
-    """Chỉ Alpha bot xử lý message, phân phối grab, và điều phối lệnh kv (PHIÊN BẢN DEBUG)"""
+    """Chỉ Alpha bot xử lý message và phân phối grab cho các bot khác"""
     channel_id = msg.get("channel_id")
-    author_id = msg.get("author", {}).get("id")
-
-    # --- PHẦN 1: XỬ LÝ DROP (Không thay đổi) ---
     target_server = next((s for s in farm_servers if s.get('main_channel_id') == channel_id), None)
-    if target_server and author_id == karuta_id and 'dropping' in msg.get("content", ""):
+    if not target_server: return
+
+    if msg.get("author", {}).get("id") == karuta_id and 'dropping' in msg.get("content", ""):
         last_drop_msg_id = msg["id"]
         
+        # Chỉ Alpha đọc Yoru Bot và phân phối grab
         def process_grab_distribution():
             time.sleep(0.6)
             try:
@@ -151,6 +152,7 @@ def handle_alpha_message(bot, msg):
                                        for line in desc.split('\n')[:3]]
                         if not any(heart_numbers): break
                         
+                        # Phân phối grab cho các bot
                         with grab_queue_lock:
                             grab_queue.append({
                                 'channel_id': channel_id,
@@ -163,6 +165,7 @@ def handle_alpha_message(bot, msg):
             except Exception as e: 
                 print(f"Lỗi đọc Yoru Bot: {e}", flush=True)
             
+            # Event grab chỉ Alpha làm
             if event_grab_enabled:
                 def check_farm_event():
                     try:
@@ -177,70 +180,21 @@ def handle_alpha_message(bot, msg):
         
         threading.Thread(target=process_grab_distribution, daemon=True).start()
 
-    # --- PHẦN 2: DEBUG LOGIC ĐIỀU PHỐI 'KV' ---
-    if 'kv_channel_id' in globals() and kv_channel_id and author_id == karuta_id:
-        content = msg.get("content", "")
-        if "took the" in content:
-            # DEBUG 1: Xác nhận code đã vào đúng khối xử lý
-            print("\n[DEBUG] Đã phát hiện tin nhắn 'took the'. Bắt đầu kiểm tra...", flush=True)
-            
-            match = re.search(r'<@(\d+)>', content)
-            if match:
-                grabber_id = match.group(1)
-                # DEBUG 2: In ra ID đã tìm thấy trong tin nhắn
-                print(f"[DEBUG] ID của người grab được (grabber_id): {grabber_id}", flush=True)
-                
-                match_found = False
-                with bots_lock:
-                    print("[DEBUG] Bắt đầu duyệt qua danh sách các bot đang chạy...", flush=True)
-                    for bot_index, bot_instance in enumerate(main_bots):
-                        bot_name = GREEK_ALPHABET[bot_index] if bot_index < len(GREEK_ALPHABET) else f'Main {bot_index}'
-                        bot_user_id = None
-                        try:
-                            if bot_instance and hasattr(bot_instance, 'gateway') and bot_instance.gateway.session:
-                                user_data = bot_instance.gateway.session.READY.get('user', {})
-                                bot_user_id = user_data.get('id')
-                                # DEBUG 3: In ra ID của từng bot trong danh sách
-                                print(f"    -> Đang kiểm tra bot '{bot_name}' với ID (bot_user_id): {bot_user_id}", flush=True)
-                        except Exception as e:
-                            print(f"    -> Lỗi khi lấy ID của bot '{bot_name}': {e}", flush=True)
-
-                        if bot_user_id and bot_user_id == grabber_id:
-                            print(f"    -> ✅ MATCH FOUND! '{bot_name}' chính là người grab được thẻ.", flush=True)
-                            print(f"✅ [KV Dispatcher] Ra lệnh cho '{bot_name}' gửi 'kv'.", flush=True)
-                            
-                            threading.Timer(1.0, bot_instance.sendMessage, args=(kv_channel_id, "kv")).start()
-                            match_found = True
-                            break # Dừng tìm kiếm
-                
-                if not match_found:
-                    # DEBUG 4: Thông báo nếu không tìm thấy bot nào trùng khớp
-                    print("[DEBUG] Không tìm thấy bot nào trong danh sách có ID trùng khớp.", flush=True)
-            else:
-                print("[DEBUG] Không tìm thấy ID người dùng trong tin nhắn.", flush=True)
-
 def grab_processor_loop():
     """Vòng lặp xử lý grab queue"""
     while True:
         try:
             current_time = time.time()
             with grab_queue_lock:
-                # Xóa grab cũ (>30s)
                 grab_queue[:] = [g for g in grab_queue if current_time - g['timestamp'] < 30]
-                
-                if grab_queue:
-                    grab_data = grab_queue.pop(0)
-                else:
-                    grab_data = None
+                grab_data = grab_queue.pop(0) if grab_queue else None
             
             if grab_data:
-                # Lấy dữ liệu ra các biến cục bộ ngay lập tức
                 current_heart_numbers = grab_data['heart_numbers']
                 current_max_num = max(current_heart_numbers)
                 current_target_server = grab_data['target_server']
                 current_grab_data = grab_data
                 
-                # Xử lý grab cho từng bot
                 with bots_lock:
                     for bot_index, bot in enumerate(main_bots):
                         if not bot_active_states.get(f'main_{bot_index}', False):
@@ -252,26 +206,30 @@ def grab_processor_loop():
                             max_index = current_heart_numbers.index(current_max_num)
                             emoji = ["1️⃣", "2️⃣", "3️⃣"][max_index]
                             delay = delays.get(max_index, 1.5)
-                            actual_delay = delay
                             
-                            # THAY ĐỔI 1: Hàm grab_action giờ nhận thêm dữ liệu cần thiết
                             def grab_action(bot_ref, bot_idx, g_data, s_config, h_num):
                                 try:
-                                    # THAY ĐỔI 2: Sử dụng dữ liệu được truyền vào, không dùng biến bên ngoài
                                     bot_ref.addReaction(g_data['channel_id'], g_data['message_id'], emoji)
                                     ktb_channel_id = s_config.get('ktb_channel_id')
                                     if ktb_channel_id:
                                         time.sleep(2)
                                         bot_ref.sendMessage(ktb_channel_id, "kt fs")
                                     bot_name = GREEK_ALPHABET[bot_idx] if bot_idx < len(GREEK_ALPHABET) else f'Main {bot_idx}'
-                                    print(f"[FARM: {s_config['name']} | Bot {bot_name}] Grab -> {h_num} tim, delay {actual_delay}s", flush=True)
+                                    print(f"[FARM: {s_config['name']} | Bot {bot_name}] Grab -> {h_num} tim, delay {delay}s", flush=True)
+
+                                    # --- LOGIC MỚI: NẾU LÀ BOT ALPHA, GỬI LỆNH KV ---
+                                    # bot_idx == 0 tương ứng với bot Alpha
+                                    if bot_idx == 0 and 'kv_channel_id' in globals() and kv_channel_id:
+                                        print(f"    -> [KV SENDER] Alpha Bot đã grab, gửi lệnh 'kv'...", flush=True)
+                                        # Gửi lệnh sau một khoảng trễ nhỏ để tránh xung đột
+                                        threading.Timer(2.0, bot_ref.sendMessage, args=(kv_channel_id, "kv")).start()
+
                                 except Exception as e:
                                     print(f"Lỗi grab bot {bot_idx}: {e}", flush=True)
                             
-                            # THAY ĐỔI 3: Truyền dữ liệu (g_data, s_config, h_num) vào Timer
-                            threading.Timer(actual_delay, grab_action, args=(bot, bot_index, current_grab_data, current_target_server, current_max_num)).start()
+                            threading.Timer(delay, grab_action, args=(bot, bot_index, current_grab_data, current_target_server, current_max_num)).start()
             
-            time.sleep(0.1)  # Giảm CPU usage
+            time.sleep(0.1)
         except Exception as e:
             print(f"[ERROR in grab_processor_loop] {e}", flush=True)
             time.sleep(1)
