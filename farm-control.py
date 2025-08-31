@@ -131,11 +131,11 @@ def get_grab_settings(target_server, bot_type, bot_index):
                 {0: 1.0, 1: 2.0, 2: 2.8})
 
 def handle_alpha_message(bot, msg):
-    """Chỉ Alpha bot xử lý message, phân phối grab, và điều phối lệnh kv"""
+    """Chỉ Alpha bot xử lý message, phân phối grab, và điều phối lệnh kv (PHIÊN BẢN DEBUG)"""
     channel_id = msg.get("channel_id")
     author_id = msg.get("author", {}).get("id")
 
-    # --- PHẦN 1: XỬ LÝ DROP VÀ PHÂN PHỐI GRAB (logic cũ, không đổi) ---
+    # --- PHẦN 1: XỬ LÝ DROP (Không thay đổi) ---
     target_server = next((s for s in farm_servers if s.get('main_channel_id') == channel_id), None)
     if target_server and author_id == karuta_id and 'dropping' in msg.get("content", ""):
         last_drop_msg_id = msg["id"]
@@ -177,34 +177,47 @@ def handle_alpha_message(bot, msg):
         
         threading.Thread(target=process_grab_distribution, daemon=True).start()
 
-    # --- PHẦN 2: LOGIC ĐIỀU PHỐI 'KV' (ĐÃ SỬA LỖI) ---
-    if kv_channel_id and author_id == karuta_id:
+    # --- PHẦN 2: DEBUG LOGIC ĐIỀU PHỐI 'KV' ---
+    if 'kv_channel_id' in globals() and kv_channel_id and author_id == karuta_id:
         content = msg.get("content", "")
         if "took the" in content:
+            # DEBUG 1: Xác nhận code đã vào đúng khối xử lý
+            print("\n[DEBUG] Đã phát hiện tin nhắn 'took the'. Bắt đầu kiểm tra...", flush=True)
+            
             match = re.search(r'<@(\d+)>', content)
             if match:
                 grabber_id = match.group(1)
+                # DEBUG 2: In ra ID đã tìm thấy trong tin nhắn
+                print(f"[DEBUG] ID của người grab được (grabber_id): {grabber_id}", flush=True)
                 
+                match_found = False
                 with bots_lock:
+                    print("[DEBUG] Bắt đầu duyệt qua danh sách các bot đang chạy...", flush=True)
                     for bot_index, bot_instance in enumerate(main_bots):
-                        # SỬA LỖI: Kiểm tra an toàn để tránh lỗi khi bot chưa sẵn sàng
+                        bot_name = GREEK_ALPHABET[bot_index] if bot_index < len(GREEK_ALPHABET) else f'Main {bot_index}'
                         bot_user_id = None
                         try:
-                            # Truy cập an toàn vào dữ liệu người dùng
-                            if bot_instance and bot_instance.gateway.session:
+                            if bot_instance and hasattr(bot_instance, 'gateway') and bot_instance.gateway.session:
                                 user_data = bot_instance.gateway.session.READY.get('user', {})
                                 bot_user_id = user_data.get('id')
-                        except Exception:
-                            # Bỏ qua nếu có bất kỳ lỗi nào khi truy cập, nghĩa là bot chưa sẵn sàng
-                            pass
+                                # DEBUG 3: In ra ID của từng bot trong danh sách
+                                print(f"    -> Đang kiểm tra bot '{bot_name}' với ID (bot_user_id): {bot_user_id}", flush=True)
+                        except Exception as e:
+                            print(f"    -> Lỗi khi lấy ID của bot '{bot_name}': {e}", flush=True)
 
-                        # Chỉ so sánh và hành động nếu lấy được ID thành công
                         if bot_user_id and bot_user_id == grabber_id:
-                            bot_name = GREEK_ALPHABET[bot_index] if bot_index < len(GREEK_ALPHABET) else f'Main {bot_index}'
-                            print(f"✅ [KV Dispatcher] Alpha phát hiện '{bot_name}' grab thành công. Ra lệnh gửi 'kv'.", flush=True)
+                            print(f"    -> ✅ MATCH FOUND! '{bot_name}' chính là người grab được thẻ.", flush=True)
+                            print(f"✅ [KV Dispatcher] Ra lệnh cho '{bot_name}' gửi 'kv'.", flush=True)
                             
                             threading.Timer(1.0, bot_instance.sendMessage, args=(kv_channel_id, "kv")).start()
-                            break
+                            match_found = True
+                            break # Dừng tìm kiếm
+                
+                if not match_found:
+                    # DEBUG 4: Thông báo nếu không tìm thấy bot nào trùng khớp
+                    print("[DEBUG] Không tìm thấy bot nào trong danh sách có ID trùng khớp.", flush=True)
+            else:
+                print("[DEBUG] Không tìm thấy ID người dùng trong tin nhắn.", flush=True)
 
 def grab_processor_loop():
     """Vòng lặp xử lý grab queue"""
