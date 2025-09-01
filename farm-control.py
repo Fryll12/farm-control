@@ -156,25 +156,37 @@ def handle_alpha_message(bot, msg):
                             is_enabled, threshold, delays = get_grab_settings(target_server, 'main', 0)
                             if is_enabled:
                                 grab_reason, grab_index, grab_value = None, -1, -1
-                                max_hearts = max(heart_numbers)
-                                if max_hearts >= threshold:
-                                    grab_reason, grab_index, grab_value = 'heart', heart_numbers.index(max_hearts), max_hearts
+                                card_lines = desc.split('\n')[:3]
+                                print_numbers = [int(match.group(1)) if (match := re.search(r'#(\d+)', line)) else 999999 for line in card_lines]
+                            
+                                # ƯU TIÊN #1: Kiểm tra có thẻ nào # < 100 không
+                                low_print_candidates = []
+                                for i in range(len(card_lines)):
+                                    if print_numbers[i] < 100:
+                                        low_print_candidates.append({'print': print_numbers[i], 'index': i})
+                            
+                                if low_print_candidates:
+                                    best_candidate = min(low_print_candidates, key=lambda x: x['print'])
+                                    grab_reason = 'low_print' # Lý do grab mới để dễ nhận biết trong log
+                                    grab_index = best_candidate['index']
+                                    grab_value = best_candidate['print']
                                 else:
-                                    card_lines = desc.split('\n')[:3]
-                                    print_numbers = [int(match.group(1)) if (match := re.search(r'#(\d+)', line)) else 999999 for line in card_lines]
-                                
-                                    # Tìm các thẻ thỏa mãn cả 2 điều kiện
-                                    candidates = []
-                                    for i in range(len(card_lines)):
-                                        if print_numbers[i] < 1000 and heart_numbers[i] > 5:
-                                            candidates.append({'print': print_numbers[i], 'index': i})
-                                
-                                    # Nếu có thẻ thỏa mãn, chọn thẻ có print thấp nhất
-                                    if candidates:
-                                        best_candidate = min(candidates, key=lambda x: x['print'])
-                                        grab_reason = 'print'
-                                        grab_index = best_candidate['index']
-                                        grab_value = best_candidate['print']
+                                    # ƯU TIÊN #2: Nếu không có, mới xét đến threshold tim
+                                    max_hearts = max(heart_numbers)
+                                    if max_hearts >= threshold:
+                                        grab_reason, grab_index, grab_value = 'heart', heart_numbers.index(max_hearts), max_hearts
+                                    else:
+                                        # ƯU TIÊN #3: Cuối cùng mới xét đến # < 1000 và tim > 10
+                                        candidates = []
+                                        for i in range(len(card_lines)):
+                                            if print_numbers[i] < 1000 and heart_numbers[i] > 10:
+                                                candidates.append({'print': print_numbers[i], 'index': i})
+                            
+                                        if candidates:
+                                            best_candidate = min(candidates, key=lambda x: x['print'])
+                                            grab_reason = 'print'
+                                            grab_index = best_candidate['index']
+                                            grab_value = best_candidate['print']
                                 
                                 if grab_reason:
                                     try:
