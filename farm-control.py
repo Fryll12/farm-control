@@ -166,7 +166,7 @@ def handle_alpha_message(bot, msg):
                                     # Tìm các thẻ thỏa mãn cả 2 điều kiện
                                     candidates = []
                                     for i in range(len(card_lines)):
-                                        if print_numbers[i] < 1000 and heart_numbers[i] > 10:
+                                        if print_numbers[i] < 1000 and heart_numbers[i] > 5:
                                             candidates.append({'print': print_numbers[i], 'index': i})
                                 
                                     # Nếu có thẻ thỏa mãn, chọn thẻ có print thấp nhất
