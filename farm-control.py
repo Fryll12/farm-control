@@ -143,7 +143,7 @@ def handle_alpha_message(bot, msg):
         def process_grab_sequentially():
             time.sleep(0.6)
             try:
-                messages = bot.getMessages(channel_id, num=5).json()
+                messages = bot.getMessages(channel_id, num=2).json()
                 for msg_item in messages:
                     if msg_item.get("author", {}).get("id") == yoru_bot_id and msg_item.get("embeds"):
                         desc = msg_item["embeds"][0].get("description", "")
