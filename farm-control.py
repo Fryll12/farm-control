@@ -157,7 +157,7 @@ def handle_alpha_message(bot, msg):
                             if is_enabled:
                                 grab_reason, grab_index, grab_value = None, -1, -1
                                 card_lines = desc.split('\n')[:3]
-                                print_numbers = [int(match.group(1)) if (match := re.search(r'#(\d+)', line)) else 999999 for line in card_lines]
+                                print_numbers = [int(matches[-1]) if (matches := re.findall(r'#(\d+)', line)) else 999999 for line in card_lines]
                             
                                 # ƯU TIÊN #1: Kiểm tra có thẻ nào # < 100 không
                                 low_print_candidates = []
@@ -285,7 +285,7 @@ def grab_processor_loop():
                             grab_reason, grab_index, grab_value = 'heart', current_heart_numbers.index(max_hearts), max_hearts
                         else:
                             card_lines = current_description.split('\n')[:3]
-                            print_numbers = [int(match.group(1)) if (match := re.search(r'#(\d+)', line)) else 999999 for line in card_lines]
+                            print_numbers = [int(matches[-1]) if (matches := re.findall(r'#(\d+)', line)) else 999999 for line in card_lines]
                             min_print = min(print_numbers)
                             if min_print < 1000:
                                 grab_reason, grab_index, grab_value = 'print', print_numbers.index(min_print), min_print
