@@ -162,7 +162,7 @@ def handle_alpha_message(bot, msg):
                                 # ƯU TIÊN #1: Kiểm tra có thẻ nào # < 100 không
                                 low_print_candidates = []
                                 for i in range(len(card_lines)):
-                                    if print_numbers[i] < 100:
+                                    if print_numbers[i] < 0:
                                         low_print_candidates.append({'print': print_numbers[i], 'index': i})
                             
                                 if low_print_candidates:
